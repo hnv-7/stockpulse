@@ -2,6 +2,19 @@ import pg from 'pg';
 import { SCHEMA } from './schema.js';
 
 /**
+ * Neon URLs say `sslmode=require`. Today `pg` treats that as `verify-full`, but pg v9 will weaken it to
+ * libpq semantics (no certificate check). Ask for full verification explicitly so it never silently downgrades.
+ * Local/self-hosted URLs without sslmode are left alone.
+ */
+function strictSsl(databaseUrl) {
+  const url = new URL(databaseUrl);
+  if (['require', 'prefer', 'verify-ca'].includes(url.searchParams.get('sslmode'))) {
+    url.searchParams.set('sslmode', 'verify-full');
+  }
+  return url.toString();
+}
+
+/**
  * Minimal async DB interface used by the store:
  *   query(sql, params) -> { rows, rowCount }
  *   exec(sql)          -> run multi-statement SQL
@@ -12,7 +25,7 @@ import { SCHEMA } from './schema.js';
 export function createPgDb(databaseUrl) {
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
   const pool = new pg.Pool({
-    connectionString: databaseUrl,
+    connectionString: strictSsl(databaseUrl),
     // Serverless functions each open their own pool, so keep it tiny.
     max: 3,
     idleTimeoutMillis: 10_000,
