@@ -192,6 +192,12 @@ function Insights({ report, period, onPick }) {
   );
 }
 
+function xirrSub(c) {
+  if (!c || c.holdings === 0) return 'Add purchase dates to see this';
+  if (c.holdings === c.of) return 'All holdings dated';
+  return `${c.holdings} of ${c.of} holdings dated (${c.investedPct.toFixed(0)}% of invested)`;
+}
+
 export default function Dashboard({ report, period, setPeriod, goToStocks }) {
   const [selected, setSelected] = useState(null);
   const { sorted, sort, toggle } = useSort(report?.holdings ?? [], { key: 'value', dir: 'desc' });
@@ -217,6 +223,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
         <Stat label="Invested" value={money(totals.invested)} />
         <Stat label="Current value" value={money(totals.value)} />
         <Stat label="Overall profit" value={signedMoney(totals.pnl)} sub={pct(totals.pnlPct)} cls={tone(totals.pnl)} />
+        <Stat label="XIRR (annualised)" value={pct(totals.xirrPct)} sub={xirrSub(totals.xirrCoverage)} cls={tone(totals.xirrPct)} />
         <Stat
           label={PERIOD_LABEL[period]}
           value={signedMoney(totals.changeValue)}
@@ -241,7 +248,10 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
 
       <section className="card">
         <h2>All holdings <span className="muted">({report.holdings.length})</span></h2>
-        <p className="muted small">Click a column heading to sort.</p>
+        <p className="muted small">
+          Click a column heading to sort. XIRR is the yearly rate that turns what you paid into today's value, counted from the purchase date.
+          Holdings without a purchase date are left out. For positions held under a year it is an extrapolated figure and can look extreme.
+        </p>
         <div className="table-wrap">
           <table>
             <thead>
@@ -252,6 +262,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
                 <SortTh label="Value" k="value" sort={sort} toggle={toggle} />
                 <SortTh label="Profit ₹" k="pnl" sort={sort} toggle={toggle} />
                 <SortTh label="Profit %" k="pnlPct" sort={sort} toggle={toggle} />
+                <SortTh label="XIRR" k="xirrPct" sort={sort} toggle={toggle} />
                 <SortTh label={PERIOD_LABEL[period]} k="periodChangePct" sort={sort} toggle={toggle} />
                 <SortTh label="From 52w high" k="fromHighPct" sort={sort} toggle={toggle} />
                 <SortTh label="Weight" k="weightPct" sort={sort} toggle={toggle} />
@@ -266,6 +277,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
                   <td className="r">{money(r.value)}</td>
                   <td className={`r ${tone(r.pnl)}`}>{signedMoney(r.pnl)}</td>
                   <td className={`r ${tone(r.pnlPct)}`}>{pct(r.pnlPct)}</td>
+                  <td className={`r ${tone(r.xirrPct)}`} title={r.purchaseDate ? `Held since ${r.purchaseDate} (${r.daysHeld} days)` : 'Add a purchase date to see XIRR'}>{pct(r.xirrPct)}</td>
                   <td className={`r ${tone(r.periodChangePct)}`}>{pct(r.periodChangePct)}</td>
                   <td className={`r ${tone(r.fromHighPct)}`}>{pct(r.fromHighPct)}</td>
                   <td className="r">{r.weightPct == null ? '—' : `${r.weightPct.toFixed(1)}%`}</td>

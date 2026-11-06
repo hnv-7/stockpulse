@@ -10,6 +10,10 @@ const user = (r) =>
     createdAt: n(r.created_at),
   };
 
+// purchase_date is formatted in SQL so it is always a plain YYYY-MM-DD string (never a timezone-shifted Date).
+const HOLDING_COLS = `id, user_id, symbol, name, quantity, invested,
+  to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date, created_at`;
+
 const holding = (r) =>
   r && {
     id: n(r.id),
@@ -17,6 +21,7 @@ const holding = (r) =>
     name: r.name,
     quantity: n(r.quantity),
     invested: n(r.invested),
+    purchase_date: r.purchase_date ?? null,
     created_at: n(r.created_at),
   };
 
@@ -90,28 +95,31 @@ export function createStore(db) {
 
     // ---------- holdings ----------
     async listHoldings(userId) {
-      return (await many('SELECT * FROM holdings WHERE user_id = $1 ORDER BY symbol', [userId])).map(holding);
+      return (await many(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 ORDER BY symbol`, [userId])).map(holding);
     },
     async countHoldings(userId) {
       return n((await one('SELECT COUNT(*) AS c FROM holdings WHERE user_id = $1', [userId])).c);
     },
     async getHolding(userId, id) {
-      return holding(await one('SELECT * FROM holdings WHERE user_id = $1 AND id = $2', [userId, id]));
+      return holding(await one(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 AND id = $2`, [userId, id]));
     },
-    async addHolding(userId, { symbol, name, quantity, invested }) {
+    async addHolding(userId, { symbol, name, quantity, invested, purchaseDate = null }) {
       return holding(
         await one(
-          `INSERT INTO holdings (user_id, symbol, name, quantity, invested, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-          [userId, symbol, name, quantity, invested, Date.now()],
+          `INSERT INTO holdings (user_id, symbol, name, quantity, invested, purchase_date, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6::date,$7) RETURNING ${HOLDING_COLS}`,
+          [userId, symbol, name, quantity, invested, purchaseDate, Date.now()],
         ),
       );
     },
-    async updateHolding(userId, id, { quantity, invested }) {
+    /** purchaseDate: undefined keeps the stored date, null clears it, a YYYY-MM-DD string sets it. */
+    async updateHolding(userId, id, { quantity, invested, purchaseDate }) {
       return holding(
         await one(
-          'UPDATE holdings SET quantity = $3, invested = $4 WHERE user_id = $1 AND id = $2 RETURNING *',
-          [userId, id, quantity, invested],
+          `UPDATE holdings SET quantity = $3, invested = $4,
+             purchase_date = CASE WHEN $5::boolean THEN $6::date ELSE purchase_date END
+           WHERE user_id = $1 AND id = $2 RETURNING ${HOLDING_COLS}`,
+          [userId, id, quantity, invested, purchaseDate !== undefined, purchaseDate ?? null],
         ),
       );
     },
@@ -135,7 +143,7 @@ export function createStore(db) {
       return (await many('SELECT DISTINCT symbol FROM holdings ORDER BY symbol')).map((r) => r.symbol);
     },
     async listAllHoldings() {
-      return (await many('SELECT * FROM holdings')).map((r) => ({ ...holding(r), userId: n(r.user_id) }));
+      return (await many(`SELECT ${HOLDING_COLS} FROM holdings`)).map((r) => ({ ...holding(r), userId: n(r.user_id) }));
     },
 
     // ---------- shared market data ----------

@@ -4,7 +4,7 @@ import { getConfig } from '../src/config.js';
 import { istDate, addDays } from '../src/dates.js';
 
 /** Spin up the full app on an in-memory Postgres with a fake market. */
-export async function setup({ prices = { 'AAA.NS': 100, 'BBB.NS': 50 }, env = {}, oidcLib } = {}) {
+export async function setup({ prices = { 'AAA.NS': 100, 'BBB.NS': 50 }, env = {}, oidcLib, deps: extraDeps = {} } = {}) {
   const db = await createPgliteDb();
   const sent = [];
   const today = istDate();
@@ -31,6 +31,7 @@ export async function setup({ prices = { 'AAA.NS': 100, 'BBB.NS': 50 }, env = {}
       getDailyHistory: async () => history,
       getQuote: async (s) => (prices[s] ? { symbol: s, price: prices[s], name: `${s} Ltd` } : null),
       searchSymbols: async () => [{ symbol: 'AAA.NS', name: 'Triple A Ltd', exchange: 'NSE' }],
+      ...extraDeps,
     },
   });
   const server = await new Promise((resolve) => {

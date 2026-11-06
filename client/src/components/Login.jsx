@@ -1,3 +1,5 @@
+import Brand from './Brand.jsx';
+
 const MESSAGES = {
   expired: 'Your sign-in attempt expired. Please try again.',
   unverified: 'Your Google email address is not verified, so it cannot be used to sign in.',
@@ -12,7 +14,7 @@ export default function Login({ authConfigured }) {
   return (
     <div className="app">
       <div className="card login">
-        <div className="brand">StockPulse</div>
+        <Brand />
         <p>
           Track your own portfolio, see which stocks are dragging it down even when every holding is in profit,
           spot buy-the-dip candidates, and get an alert when a stock falls by a percentage you choose.

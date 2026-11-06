@@ -6,6 +6,7 @@ import Holdings from './components/Holdings.jsx';
 import Alerts from './components/Alerts.jsx';
 import Account from './components/Account.jsx';
 import Login from './components/Login.jsx';
+import Brand from './components/Brand.jsx';
 
 const TABS = [
   ['dashboard', 'Dashboard'],
@@ -63,7 +64,7 @@ function Portfolio({ me, setMe, onSignedOut }) {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">StockPulse</div>
+        <Brand />
         <nav>
           {TABS.map(([id, label]) => (
             <button key={id} className={tab === id ? 'tab active' : 'tab'} onClick={() => setTab(id)}>

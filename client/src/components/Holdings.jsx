@@ -3,13 +3,20 @@ import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
 import { money, price, signedMoney, pct, tone } from '../format.js';
 
+// Latest allowed purchase date (today in India, matching the server's rule).
+const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const niceDate = (d) =>
+  d ? new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+
 function AddForm({ onAdded }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [picked, setPicked] = useState(null);
   const [quantity, setQuantity] = useState('');
   const [invested, setInvested] = useState('');
+  const [purchaseDate, setPurchaseDate] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState(-1); // highlighted suggestion, -1 = none
   const timer = useRef();
@@ -62,11 +69,24 @@ function AddForm({ onAdded }) {
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     const symbol = picked?.symbol ?? query.trim().toUpperCase();
     setBusy(true);
     try {
-      await api.addHolding({ symbol, quantity: Number(quantity), invested: Number(invested) });
-      setQuery(''); setResults([]); setPicked(null); setQuantity(''); setInvested('');
+      const added = await api.addHolding({
+        symbol,
+        ...(quantity ? { quantity: Number(quantity) } : {}),
+        ...(invested ? { invested: Number(invested) } : {}),
+        ...(purchaseDate ? { purchaseDate } : {}),
+      });
+      if (added.priceOn) {
+        const { date, close } = added.priceOn;
+        setNotice(
+          `Added ${added.quantity} shares for ${money(added.invested)}, using the closing price of ${money(close)} on ${niceDate(date)}` +
+          `${date !== purchaseDate ? ` (the last trading day on or before ${niceDate(purchaseDate)})` : ''}.`,
+        );
+      }
+      setQuery(''); setResults([]); setPicked(null); setQuantity(''); setInvested(''); setPurchaseDate('');
       onAdded();
     } catch (err) {
       setError(err.message);
@@ -114,14 +134,25 @@ function AddForm({ onAdded }) {
       )}
       <div className="row">
         <label>
+          Purchase date (optional)
+          <input type="date" max={todayIST()} value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} />
+        </label>
+        <label>
           Quantity (shares)
-          <input type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+          <input type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} required={!purchaseDate || !invested} />
         </label>
         <label>
           Total invested (₹)
-          <input type="number" min="0" step="any" value={invested} onChange={(e) => setInvested(e.target.value)} required />
+          <input type="number" min="0" step="any" value={invested} onChange={(e) => setInvested(e.target.value)} required={!purchaseDate || !quantity} />
         </label>
       </div>
+      {purchaseDate && (
+        <p className="muted small">
+          With a purchase date you can fill in just one of quantity or amount. The other is worked out from that day's closing price on Yahoo Finance
+          (the previous trading day if the market was closed).
+        </p>
+      )}
+      {notice && <div className="notice" role="status">{notice}</div>}
       {error && <div className="error" role="alert">{error}</div>}
       <button className="primary" disabled={busy}>{busy ? 'Adding…' : 'Add to portfolio'}</button>
     </form>
@@ -132,11 +163,16 @@ function Row({ h, onChanged }) {
   const [editing, setEditing] = useState(false);
   const [quantity, setQuantity] = useState(String(h.quantity));
   const [invested, setInvested] = useState(String(h.invested));
+  const [purchaseDate, setPurchaseDate] = useState(h.purchase_date ?? '');
   const [error, setError] = useState('');
 
   const save = async () => {
     try {
-      await api.updateHolding(h.id, { quantity: Number(quantity), invested: Number(invested) });
+      await api.updateHolding(h.id, {
+        quantity: Number(quantity),
+        invested: Number(invested),
+        purchaseDate: purchaseDate || null, // empty clears the date
+      });
       setEditing(false); setError('');
       onChanged();
     } catch (e) {
@@ -156,6 +192,7 @@ function Row({ h, onChanged }) {
         <>
           <td className="r"><input className="narrow" type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} aria-label="Quantity" /></td>
           <td className="r"><input className="narrow" type="number" min="0" step="any" value={invested} onChange={(e) => setInvested(e.target.value)} aria-label="Invested" /></td>
+          <td className="r"><input type="date" max={todayIST()} value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} aria-label="Purchase date" /></td>
           <td colSpan={3} className="r">
             {error && <span className="neg small">{error} </span>}
             <button onClick={save}>Save</button> <button onClick={() => setEditing(false)}>Cancel</button>
@@ -165,6 +202,7 @@ function Row({ h, onChanged }) {
         <>
           <td className="r">{h.quantity}</td>
           <td className="r">{money(h.invested)}</td>
+          <td className="r nowrap">{niceDate(h.purchase_date)}</td>
           <td className="r">{h.value == null ? '—' : money(h.value)}</td>
           <td className={`r ${tone(h.pnl)}`}>{h.pnl == null ? '—' : <>{signedMoney(h.pnl)} <span className="small">({pct(h.pnlPct)})</span></>}</td>
           <td className="r">{price(h.price)}</td>
@@ -177,9 +215,137 @@ function Row({ h, onChanged }) {
   );
 }
 
+const MAX_UPLOAD = 2 * 1024 * 1024; // keep in step with the server limit
+
+/** Export button plus a file picker. Reading the file is the server's job; this only uploads it for a preview. */
+function ImportExport({ onPreview, onMessage }) {
+  const fileRef = useRef();
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow choosing the same file again
+    if (!file) return;
+    onMessage(null);
+    if (file.size > MAX_UPLOAD) return onMessage({ ok: false, text: 'File is too large (max 2 MB).' });
+    setBusy(true);
+    try {
+      onPreview(await api.previewImport(file));
+    } catch (err) {
+      onMessage({ ok: false, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="actions">
+      <a className="button" href="/api/holdings/export" download>Export CSV</a>
+      <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}>{busy ? 'Reading file…' : 'Import statement'}</button>
+      <input ref={fileRef} type="file" accept=".xlsx,.csv,.json,.pdf,text/csv,application/json,application/pdf" hidden onChange={onFile} />
+    </div>
+  );
+}
+
+const FORMAT_LABEL = { xlsx: 'Excel', csv: 'CSV', json: 'JSON', pdf: 'PDF' };
+
+/** Shows what the uploaded statement would change; nothing is saved until the user confirms. */
+function ImportReview({ preview, onDone, onCancel }) {
+  const [picked, setPicked] = useState(() => new Set(preview.items.map((i) => i.symbol)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const toggle = (symbol) =>
+    setPicked((s) => {
+      const next = new Set(s);
+      if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
+      return next;
+    });
+
+  const chosen = preview.items.filter((i) => picked.has(i.symbol));
+  const confirm = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.importHoldings(
+        chosen.map((i) => ({ symbol: i.symbol, quantity: i.quantity, invested: i.invested, purchaseDate: i.purchaseDate })),
+      );
+      onDone(r);
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="review" role="region" aria-label="Import preview">
+      <h3>
+        Review import <span className="muted">({FORMAT_LABEL[preview.format] ?? preview.format} file)</span>
+      </h3>
+      <p className="muted small">
+        Nothing has been saved yet. Matching stocks are updated with the figures from the file, new ones are added, and nothing is removed.
+        Check any stock matched by company name.
+      </p>
+      {preview.items.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><span className="sr-only">Include</span></th>
+                <th>Stock</th>
+                <th className="r">Qty</th>
+                <th className="r">Invested</th>
+                <th className="r">Bought</th>
+                <th>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.items.map((i) => (
+                <tr key={i.symbol}>
+                  <td><input type="checkbox" checked={picked.has(i.symbol)} onChange={() => toggle(i.symbol)} aria-label={`Include ${i.symbol}`} /></td>
+                  <td>
+                    <strong>{i.symbol}</strong>
+                    <div className="muted small">{i.name}</div>
+                    {i.notes.map((n) => <div key={n} className="warn small">{n}</div>)}
+                  </td>
+                  <td className="r">{i.quantity}</td>
+                  <td className="r">{money(i.invested)}</td>
+                  <td className="r nowrap">{niceDate(i.purchaseDate)}</td>
+                  <td className="small">
+                    {i.action === 'add' ? <span className="pos">New</span> : (
+                      <>Update<div className="muted">was {i.current.quantity} for {money(i.current.invested)}</div></>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {preview.errors.length > 0 && (
+        <div className="error" role="status">
+          {preview.errors.length} row{preview.errors.length === 1 ? '' : 's'} skipped:
+          <ul className="small">
+            {preview.errors.map((x, k) => <li key={k}>{x.name ? `${x.name}: ` : ''}{x.error}</li>)}
+          </ul>
+        </div>
+      )}
+      {error && <div className="error" role="alert">{error}</div>}
+      <div className="actions">
+        <button className="primary" onClick={confirm} disabled={busy || chosen.length === 0}>
+          {busy ? 'Importing…' : `Import ${chosen.length} stock${chosen.length === 1 ? '' : 's'}`}
+        </button>
+        <button onClick={onCancel} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 export default function Holdings({ onChange }) {
   const [holdings, setHoldings] = useState([]);
   const [rows, setRows] = useState(new Map());
+  const [preview, setPreview] = useState(null); // an uploaded statement awaiting confirmation
+  const [message, setMessage] = useState(null); // { ok, text }
 
   const load = async () => {
     const [h, r] = await Promise.all([api.holdings(), api.report('1w')]);
@@ -189,6 +355,14 @@ export default function Holdings({ onChange }) {
   useEffect(() => { load().catch(() => {}); }, []);
 
   const changed = async () => { await load(); onChange(); };
+
+  const imported = async (r) => {
+    setPreview(null);
+    const parts = [`${r.added} added`, `${r.updated} updated`];
+    if (r.errors.length) parts.push(`${r.errors.length} skipped (${r.errors.map((e) => `${e.symbol}: ${e.error}`).join('; ')})`);
+    setMessage({ ok: r.errors.length === 0, text: `Import finished: ${parts.join(', ')}.` });
+    await changed();
+  };
 
   // Merge live figures into each holding so every column is sortable.
   const merged = useMemo(
@@ -201,8 +375,17 @@ export default function Holdings({ onChange }) {
     <>
       <AddForm onAdded={changed} />
       <section className="card">
-        <h2>Your holdings <span className="muted">({holdings.length} {holdings.length === 1 ? 'stock' : 'stocks'})</span></h2>
-        <p className="muted">Update quantity and invested amount whenever you buy more (the average cost is invested ÷ quantity).</p>
+        <div className="card-head">
+          <h2>Your holdings <span className="muted">({holdings.length} {holdings.length === 1 ? 'stock' : 'stocks'})</span></h2>
+          <ImportExport onPreview={(p) => { setMessage(null); setPreview(p); }} onMessage={setMessage} />
+        </div>
+        <p className="muted">
+          Update quantity and invested amount whenever you buy more (the average cost is invested ÷ quantity).
+          To load your portfolio from a broker, use <strong>Import statement</strong> with the holdings file you download from Groww, Zerodha, Dhan, Upstox, Angel One and similar
+          (Excel, CSV, JSON or PDF). You can review everything before it is saved. Export CSV gives you a file you can edit and import back.
+        </p>
+        {message && <div className={message.ok ? 'notice' : 'error'} role="status">{message.text}</div>}
+        {preview && <ImportReview preview={preview} onDone={imported} onCancel={() => setPreview(null)} />}
         {holdings.length === 0 ? (
           <p className="muted">Nothing here yet.</p>
         ) : (
@@ -213,6 +396,7 @@ export default function Holdings({ onChange }) {
                   <SortTh label="Stock" k="symbol" textual right={false} sort={sort} toggle={toggle} />
                   <SortTh label="Qty" k="quantity" sort={sort} toggle={toggle} />
                   <SortTh label="Invested" k="invested" sort={sort} toggle={toggle} />
+                  <SortTh label="Bought" k="purchase_date" sort={sort} toggle={toggle} />
                   <SortTh label="Current value" k="value" sort={sort} toggle={toggle} />
                   <SortTh label="Profit %" k="pnlPct" sort={sort} toggle={toggle} />
                   <SortTh label="Price" k="price" sort={sort} toggle={toggle} />
@@ -220,7 +404,7 @@ export default function Holdings({ onChange }) {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((h) => <Row key={`${h.id}-${h.quantity}-${h.invested}`} h={h} onChanged={changed} />)}
+                {sorted.map((h) => <Row key={`${h.id}-${h.quantity}-${h.invested}-${h.purchase_date}`} h={h} onChanged={changed} />)}
               </tbody>
             </table>
           </div>

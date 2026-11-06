@@ -15,6 +15,7 @@ Prices are fetched automatically on a schedule, so history keeps building even w
 - **Charts**: portfolio value vs invested, per-stock price history with your average cost line, and a "what moved my portfolio" bar chart.
 - **Drop alerts**: e.g. "tell me if any stock falls 5% in a day / 8% in a week / 10% in a month / 15% from its 52-week high". Shown in-app, and by email if the user opts in.
 - **Accounts**: every user only ever sees their own data. Users can sign out or delete their account and all data.
+- **Broker import / export**: on the Holdings tab, *Import statement* reads the holdings file downloaded from Groww, Zerodha (Console/Kite), Dhan, Upstox, Angel One and similar, as Excel (`.xlsx`), CSV, JSON or PDF. Columns are matched by name (not position), the header is found below any preamble, and stocks are matched to NSE/BSE symbols by ticker, ISIN or company name. You review the result (and untick rows) before anything is saved; imports only add or update, never delete. *Export CSV* downloads your portfolio, which can be edited and imported back. An optional purchase date can be stored per holding.
 
 ## Architecture
 
@@ -49,6 +50,7 @@ You need free accounts on GitHub, Neon, Google Cloud and Vercel.
 - Vercel Hobby cron runs once a day with up to ±59 minutes of timing slack. That is why hourly polling uses GitHub Actions.
 - Prices come from Yahoo Finance's unofficial API. They are typically delayed ~15 minutes and could change or be rate-limited without notice.
 - Hourly points exist only for hours the poll actually ran. Daily closes are back-filled, so daily/weekly/monthly reports have no gaps.
+- Statement import: files up to 2 MB, 500 rows, and 30 PDF pages. PDFs are read by text position, so they work for text-based statements but not scanned images or password-protected files; Excel/CSV is the most reliable. Old `.xls` files must be saved as `.xlsx` first. Brokers change their layouts now and then, so check the preview, especially stocks marked "matched by company name".
 - This is a tracking tool, not investment advice.
 
 ### Not yet verified on a real deployment

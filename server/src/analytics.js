@@ -48,10 +48,41 @@ export function high52(series, today, currentPrice) {
   return high || null;
 }
 
+/** Whole days from `from` to `to` (both YYYY-MM-DD). */
+export function daysBetween(from, to) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}
+
+/**
+ * XIRR (annualised, day-count/365 as in Excel) for money put in on known dates and worth `value` today.
+ * lots: [{invested, days}] where days = days held up to today. Returns a fraction (0.12 = 12%), or null
+ * when it is undefined (nothing held yet, no value, or no sensible rate).
+ *
+ * The future value of the lots at rate r is invested*(1+r)^(days/365), which only grows with r, so the
+ * rate that makes it equal today's value is found by bisection and cannot land on a wrong root.
+ */
+export function xirr(lots, value) {
+  if (!(value > 0) || !lots.length || lots.some((l) => !(l.invested > 0) || !(l.days >= 0))) return null;
+  if (lots.every((l) => l.days === 0)) return null;
+  const gap = (r) => value - lots.reduce((s, l) => s + l.invested * (1 + r) ** (l.days / 365), 0);
+  let lo = -0.999999;
+  let hi = 1;
+  while (gap(hi) > 0) {
+    hi *= 2;
+    if (hi > 1e9) return null;
+  }
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2;
+    if (gap(mid) > 0) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 /**
  * Build the per-stock + portfolio report for a period.
  *
- * holdings: [{symbol, name, quantity, invested}]
+ * holdings: [{symbol, name, quantity, invested, purchase_date?}]
  * seriesBySymbol: Map<symbol, [{date, close}]> ascending
  * latestBySymbol: Map<symbol, price>
  */
@@ -66,6 +97,8 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
     const refValue = ref ? ref.close * h.quantity : null;
     const periodChangeValue = value != null && refValue != null ? value - refValue : null;
     const hi = price == null ? null : high52(series, today, price);
+    const daysHeld = h.purchase_date ? daysBetween(h.purchase_date, today) : null;
+    const rate = daysHeld != null && value != null ? xirr([{ invested: h.invested, days: daysHeld }], value) : null;
 
     return {
       symbol: h.symbol,
@@ -73,6 +106,9 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
       quantity: h.quantity,
       invested: h.invested,
       avgCost: h.invested / h.quantity,
+      purchaseDate: h.purchase_date ?? null,
+      daysHeld,
+      xirrPct: rate == null ? null : rate * 100,
       price,
       value,
       pnl,
@@ -98,6 +134,13 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
   const pnl = value - invested;
   const pnlPct = invested > 0 ? (pnl / invested) * 100 : null;
 
+  // Portfolio XIRR uses only holdings that have both a purchase date and a price; coverage says how much that is.
+  const dated = rows.filter((r) => r.daysHeld != null && r.value != null);
+  const datedValue = dated.reduce((s, r) => s + r.value, 0);
+  const datedInvested = dated.reduce((s, r) => s + r.invested, 0);
+  const portfolioRate = xirr(dated.map((r) => ({ invested: r.invested, days: r.daysHeld })), datedValue);
+  const xirrCoverage = { holdings: dated.length, of: rows.length, investedPct: invested > 0 ? (datedInvested / invested) * 100 : null };
+
   for (const r of rows) {
     r.weightPct = value > 0 && r.value != null ? (r.value / value) * 100 : null;
     // Share of the portfolio's rupee movement this stock explains (negative = dragging).
@@ -122,7 +165,11 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
 
   return {
     period,
-    totals: { invested, value, pnl, pnlPct, changeValue, changePct },
+    totals: {
+      invested, value, pnl, pnlPct, changeValue, changePct,
+      xirrPct: portfolioRate == null ? null : portfolioRate * 100,
+      xirrCoverage,
+    },
     holdings: rows,
     draggers,
     laggards,

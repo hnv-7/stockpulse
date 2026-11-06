@@ -21,7 +21,22 @@ async function request(method, path, body) {
   return data;
 }
 
+/** Upload a broker statement (xlsx / csv / json / pdf) as-is; the server reads it and returns what would change. */
+async function previewImport(file) {
+  const res = await fetch('/api/holdings/import/preview', {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', 'x-csrf-token': csrfToken },
+    credentials: 'same-origin',
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Could not read the file (${res.status})`);
+  return data;
+}
+
 export const api = {
+  previewImport,
+  importHoldings: (items) => request('POST', '/holdings/import', { items }),
   me: () => request('GET', '/me'),
   updateSettings: (s) => request('PUT', '/me/settings', s),
   logout: () => request('POST', '/auth/logout'),

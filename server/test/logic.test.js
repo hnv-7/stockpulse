@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReport, portfolioHistory, pctChange, referencePrice } from '../src/analytics.js';
+import { buildReport, portfolioHistory, pctChange, referencePrice, xirr, daysBetween } from '../src/analytics.js';
 import { evaluateRules } from '../src/alerts.js';
 
 const TODAY = '2026-11-06';
@@ -70,6 +70,63 @@ test('buildReport tolerates a stock with no data', () => {
   assert.equal(r.holdings[0].price, null);
   assert.equal(r.totals.changePct, null);
   assert.deepEqual(r.draggers, []);
+});
+
+test('xirr matches hand-computed annualised rates', () => {
+  const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} vs ${b}`);
+  near(xirr([{ invested: 1000, days: 365 }], 2000), 1);          // doubled in a year = 100%
+  near(xirr([{ invested: 1000, days: 730 }], 1210), 0.1);        // 10% a year for two years
+  near(xirr([{ invested: 1000, days: 365 }, { invested: 1000, days: 0 }], 2100), 0.1); // two lots
+  near(xirr([{ invested: 1000, days: 365 }], 800), -0.2);        // a loss gives a negative rate
+  near(xirr([{ invested: 1000, days: 100 }], 1000), 0);          // flat = 0%
+  assert.equal(xirr([{ invested: 1000, days: 0 }], 1100), null, 'bought today: no rate yet');
+  assert.equal(xirr([{ invested: 1000, days: 10 }], 0), null);
+  assert.equal(xirr([{ invested: 0, days: 10 }], 5), null);
+  assert.equal(xirr([], 5), null);
+});
+
+test('daysBetween counts calendar days', () => {
+  assert.equal(daysBetween('2024-02-28', '2024-03-01'), 2); // leap year
+  assert.equal(daysBetween('2025-11-06', '2026-11-06'), 365);
+  assert.equal(daysBetween('2026-11-06', '2026-11-06'), 0);
+});
+
+test('buildReport: per-stock and portfolio XIRR use purchase dates, undated holdings are left out and counted', () => {
+  const holdings = [
+    { symbol: 'A', name: 'A', quantity: 10, invested: 1000, purchase_date: '2025-11-06' }, // 365 days, worth 2000
+    { symbol: 'B', name: 'B', quantity: 10, invested: 1000, purchase_date: '2026-11-06' }, // bought today
+    { symbol: 'C', name: 'C', quantity: 10, invested: 3000, purchase_date: null },         // undated
+  ];
+  const r = buildReport({
+    holdings,
+    seriesBySymbol: new Map([['A', []], ['B', []], ['C', []]]),
+    latestBySymbol: new Map([['A', 200], ['B', 100], ['C', 300]]),
+    today: TODAY,
+    period: '1w',
+  });
+  const by = Object.fromEntries(r.holdings.map((h) => [h.symbol, h]));
+  assert.ok(Math.abs(by.A.xirrPct - 100) < 1e-4);
+  assert.equal(by.A.daysHeld, 365);
+  assert.equal(by.B.xirrPct, null);
+  assert.equal(by.C.xirrPct, null);
+  assert.equal(by.C.daysHeld, null);
+  // Dated holdings only: 1000 for 365 days + 1000 today, now worth 2000 + 1000 -> 1000(1+r)+1000 = 3000 -> r = 100%
+  assert.ok(Math.abs(r.totals.xirrPct - 100) < 1e-4);
+  assert.equal(r.totals.xirrCoverage.holdings, 2);
+  assert.equal(r.totals.xirrCoverage.of, 3);
+  assert.ok(Math.abs(r.totals.xirrCoverage.investedPct - 40) < 1e-9);
+});
+
+test('buildReport: no dated holdings means no XIRR rather than a made-up number', () => {
+  const r = buildReport({
+    holdings: [{ symbol: 'A', name: 'A', quantity: 1, invested: 100 }],
+    seriesBySymbol: new Map([['A', []]]),
+    latestBySymbol: new Map([['A', 150]]),
+    today: TODAY,
+    period: '1w',
+  });
+  assert.equal(r.totals.xirrPct, null);
+  assert.equal(r.totals.xirrCoverage.holdings, 0);
 });
 
 test('portfolioHistory forward-fills and skips days before all stocks have data', () => {

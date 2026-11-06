@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS holdings (
   UNIQUE (user_id, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_holdings_symbol ON holdings (symbol);
+-- Optional: when the user bought the stock. Added later, so it is an idempotent ALTER.
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS purchase_date DATE;
 
 CREATE TABLE IF NOT EXISTS daily_prices (
   symbol TEXT NOT NULL,

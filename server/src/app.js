@@ -5,8 +5,11 @@ import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { istDate, addDays } from './dates.js';
+import { toCsv, importHoldings, isPastOrToday, MAX_IMPORT_ROWS } from './portfolio-io.js';
+import { previewImport } from './import-mapping.js';
+import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
 import { buildReport, portfolioHistory } from './analytics.js';
-import { getQuote, searchSymbols } from './market.js';
+import { getQuote, getCloseOn, searchSymbols } from './market.js';
 import { safeEqual } from './auth.js';
 
 const periodSchema = z.enum(['1d', '1w', '1m', '3m', '1y']).default('1w');
@@ -17,8 +20,21 @@ const symbolSchema = z
   .regex(/^[A-Z0-9&.-]{1,20}$/, 'invalid symbol');
 const positive = z.number().finite().positive().max(1e12);
 
-const holdingSchema = z.object({ symbol: symbolSchema, quantity: positive, invested: positive });
-const holdingUpdateSchema = z.object({ quantity: positive, invested: positive });
+// Optional purchase date: a real YYYY-MM-DD date that is not in the future. null clears it on update.
+const purchaseDateSchema = z
+  .string()
+  .refine(isPastOrToday, 'purchase date must be a valid date, not in the future')
+  .nullable()
+  .optional();
+
+// On add, quantity or invested may be left out when a purchase date is given: the missing one is worked out from that day's close.
+const holdingSchema = z.object({
+  symbol: symbolSchema,
+  quantity: positive.optional(),
+  invested: positive.optional(),
+  purchaseDate: purchaseDateSchema,
+});
+const holdingUpdateSchema = z.object({ quantity: positive, invested: positive, purchaseDate: purchaseDateSchema });
 const ruleSchema = z.object({
   symbol: symbolSchema.nullable().optional(),
   window: z.enum(['1d', '1w', '1m', 'high52']),
@@ -61,6 +77,7 @@ const limiter = (windowMs, limit) =>
 
 export function createApp({ store, tracker, auth, config, notifier, deps = {} }) {
   const lookupQuote = deps.getQuote ?? getQuote;
+  const lookupCloseOn = deps.getCloseOn ?? getCloseOn;
   const search = deps.searchSymbols ?? searchSymbols;
   const app = express();
   app.disable('x-powered-by');
@@ -74,7 +91,9 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       },
     }),
   );
-  app.use(express.json({ limit: '10kb' }));
+  // Small JSON bodies everywhere, except the import confirm route which carries up to a few hundred rows.
+  const smallJson = express.json({ limit: '10kb' });
+  app.use((req, res, next) => (req.path.startsWith('/api/holdings/import') ? next() : smallJson(req, res, next)));
 
   const api = express.Router();
   api.use(limiter(15 * 60_000, 600));
@@ -142,9 +161,64 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   // ---------- holdings ----------
   api.get('/holdings', async (req, res) => res.json(await store.listHoldings(req.session.user.id)));
 
+  // Download the portfolio as CSV. The same columns are accepted by the import below.
+  api.get('/holdings/export', async (req, res) => {
+    const holdings = await store.listHoldings(req.session.user.id);
+    const csv = toCsv(
+      ['Symbol', 'Name', 'Quantity', 'Invested', 'Purchase Date'],
+      holdings.map((h) => [h.symbol, h.name, h.quantity, h.invested, h.purchase_date]),
+    );
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="stockpulse-portfolio-${istDate()}.csv"`);
+    res.send(csv);
+  });
+
+  // Step 1 of an import: upload a broker statement (xlsx / csv / json / pdf) and get back what would change.
+  // Nothing is saved here.
+  api.post(
+    '/holdings/import/preview',
+    limiter(60_000, 10),
+    express.raw({ type: () => true, limit: MAX_FILE_BYTES }),
+    async (req, res) => {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'choose a file to import');
+      try {
+        res.json(
+          await previewImport({
+            buf: req.body,
+            existing: await store.listHoldings(req.session.user.id),
+            lookupQuote,
+            search,
+            maxHoldings: config.maxHoldingsPerUser,
+          }),
+        );
+      } catch (e) {
+        if (e instanceof ImportError) throw new HttpError(400, e.message);
+        throw e;
+      }
+    },
+  );
+
+  // Step 2: save the (possibly edited) preview. New symbols are added, existing ones updated; nothing is deleted.
+  api.post('/holdings/import', limiter(60_000, 10), express.json({ limit: '200kb' }), async (req, res) => {
+    const { items } = parse(
+      z.object({ items: z.array(holdingSchema).min(1, 'nothing to import').max(MAX_IMPORT_ROWS, `too many rows (max ${MAX_IMPORT_ROWS})`) }),
+      req.body,
+    );
+    const result = await importHoldings({
+      store,
+      tracker,
+      lookupQuote,
+      maxHoldings: config.maxHoldingsPerUser,
+      userId: req.session.user.id,
+      rows: items.map((it, i) => ({ line: i + 1, ...it })),
+    });
+    res.json(result);
+  });
+
   api.post('/holdings', limiter(60_000, 20), async (req, res) => {
     const userId = req.session.user.id;
-    const { symbol, quantity, invested } = parse(holdingSchema, req.body);
+    const { symbol, quantity: qtyIn, invested: investedIn, purchaseDate } = parse(holdingSchema, req.body);
+    if (!qtyIn && !investedIn) throw new HttpError(400, 'enter the quantity, the amount invested, or both');
     if ((await store.countHoldings(userId)) >= config.maxHoldingsPerUser) {
       throw new HttpError(400, `you can track up to ${config.maxHoldingsPerUser} stocks`);
     }
@@ -154,12 +228,25 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     }
     const quote = await lookupQuote(symbol).catch(() => null);
     if (!quote) throw new HttpError(404, 'symbol not found (use NSE/BSE format, e.g. INFY.NS)');
-    const holding = await store.addHolding(userId, { symbol, name: quote.name, quantity, invested });
+
+    let quantity = qtyIn;
+    let invested = investedIn;
+    let priceOn = null;
+    if (!quantity || !invested) {
+      if (!purchaseDate) throw new HttpError(400, 'enter both quantity and amount invested, or add a purchase date so one can be worked out');
+      priceOn = await lookupCloseOn(symbol, purchaseDate).catch(() => null);
+      if (!priceOn) throw new HttpError(404, 'no price found for that purchase date — enter both quantity and amount invested');
+      if (!quantity) quantity = Math.round((invested / priceOn.close) * 10_000) / 10_000;
+      else invested = Math.round(quantity * priceOn.close * 100) / 100;
+      if (!(quantity > 0) || !(invested > 0)) throw new HttpError(400, 'amount is too small to buy any shares on that date');
+    }
+
+    const holding = await store.addHolding(userId, { symbol, name: quote.name, quantity, invested, purchaseDate: purchaseDate ?? null });
     // History is shared between users, so only fetch it if nobody holds this symbol yet.
     const have = (await store.getSeriesMany([symbol], addDays(istDate(), -60))).get(symbol);
     if (have.length < 20) await tracker.backfill(symbol).catch(() => 0);
     await store.saveSnapshots([{ symbol, ts: Date.now(), price: quote.price }]);
-    res.status(201).json(holding);
+    res.status(201).json(priceOn ? { ...holding, priceOn } : holding);
   });
 
   api.put('/holdings/:id', async (req, res) => {
@@ -271,7 +358,14 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
-    const status = err instanceof HttpError ? err.status : err?.type === 'entity.parse.failed' ? 400 : 500;
+    const status =
+      err instanceof HttpError
+        ? err.status
+        : err?.type === 'entity.parse.failed'
+          ? 400
+          : err?.type === 'entity.too.large'
+            ? 413
+            : 500;
     if (status === 500) {
       console.error(JSON.stringify({ level: 'error', msg: 'unhandled', error: err?.message }));
     }
