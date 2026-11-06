@@ -1,0 +1,25 @@
+name: Poll prices
+
+# Vercel's free plan only allows daily cron jobs, so GitHub Actions triggers the hourly poll.
+# Times are UTC. IST = UTC+5:30, so 03:50-09:50 UTC is 09:20-15:20 IST, plus a final run at 15:45 IST.
+on:
+  schedule:
+    - cron: '50 3-9 * * 1-5'
+    - cron: '15 10 * * 1-5'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call the poll endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail --silent --show-error --max-time 120 --retry 2 --retry-delay 10 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL}/api/cron/poll"
