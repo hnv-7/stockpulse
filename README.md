@@ -20,7 +20,7 @@ Prices are fetched automatically on a schedule, so history keeps building even w
 
 | Piece | Service | Notes |
 |---|---|---|
-| Web app + API | Vercel (React build + one Express serverless function) | no always-on server, nothing binds to `0.0.0.0` |
+| Web app + API | Vercel project with two [services](https://vercel.com/docs/services): `client` (Vite/React) and `server` (Express) | no always-on server, nothing binds to `0.0.0.0` |
 | Database | Neon (hosted Postgres) | free tier is enough |
 | Sign-in | Google OpenID Connect (PKCE, state, nonce) | sessions are random tokens, stored hashed |
 | Hourly price polling | GitHub Actions schedule → `GET /api/cron/poll` | Vercel's free plan only allows daily cron |
@@ -34,7 +34,7 @@ You need free accounts on GitHub, Neon, Google Cloud and Vercel.
 
 1. **Database**: create a Neon project and copy the connection string (it must include `sslmode=require`). Tables are created automatically on first request.
 2. **Push this repo to GitHub.**
-3. **Vercel**: import the repo, set the **Root Directory** to `StockPulse` if the repo contains other folders, and add these environment variables (see [`server/.env.example`](server/.env.example)):
+3. **Vercel**: import the repo (leave the Root Directory at the repo root; [`vercel.json`](vercel.json) declares the `client` and `server` services, routes `/api/*` to `server` and everything else to `client`; no bindings are needed because the browser is the only caller of the API). Add these environment variables (see [`server/.env.example`](server/.env.example)):
    - `DATABASE_URL`: the Neon string
    - `APP_BASE_URL`: your final `https://…` URL (no trailing slash). You can set it after the first deploy and redeploy.
    - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`: see step 4
@@ -55,10 +55,10 @@ You need free accounts on GitHub, Neon, Google Cloud and Vercel.
 
 The code is tested locally (API tests on an in-process Postgres, plus a browser run against live Yahoo data), but these depend on the hosted services and should be checked on your first deploy:
 
-- the `/api/*` rewrite keeps the original URL so Express routes correctly (check `https://<domain>/api/me` returns JSON);
+- the Vercel Services config (Beta) building both services from the npm workspace and routing `/api/*` to Express with the original path (check `https://<domain>/api/me` returns JSON);
 - the Google sign-in round trip with your real OAuth client;
 - Yahoo Finance not throttling Vercel's shared IPs;
-- the `maxDuration` of 60 seconds being allowed on your plan.
+- the first request (table creation and history back-fill) finishing within the default function time limit.
 
 ## Run locally (no Google or Postgres needed)
 
