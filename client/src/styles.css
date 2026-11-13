@@ -92,4 +92,16 @@ a.button { display: inline-block; text-decoration: none; padding: 8px 14px; bord
 a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 a.button.primary:hover { background: #1d4ed8; }
 .form label.check { flex-direction: row; align-items: center; gap: 8px; font-size: 14px; color: var(--text); flex: none; }
+tr.sell-row, tr.sell-row:hover { background: #fffbeb; cursor: default; }
+tr.sell-row > td { padding: 0; }
+.sell-panel { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border-left: 3px solid var(--accent); }
+.sell-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sell-panel label.field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 150px; font-size: 12px; color: var(--muted); }
+.sell-panel .with-link { display: flex; align-items: center; gap: 10px; }
+.sell-panel .with-link input { flex: 1; min-width: 0; }
+.sell-preview { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+.sell-preview > div { display: flex; flex-direction: column; }
+.sell-preview strong { font-size: 16px; }
+.sell-total { display: flex; flex-direction: column; align-items: flex-end; }
+.sell-total strong { font-size: 18px; }
 

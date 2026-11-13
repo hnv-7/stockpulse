@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
 import { money, price, signedMoney, pct, tone } from '../format.js';
@@ -234,7 +234,99 @@ function LotRow({ h, lot, onChanged }) {
   );
 }
 
-function Row({ h, onChanged }) {
+/**
+ * Sell form for one stock. Purchases are sold oldest first, so the preview walks them the same way the server does
+ * and shows the cost of the shares being sold, the charges and the profit before anything is saved.
+ */
+function SellRow({ h, onDone, onCancel }) {
+  const [quantity, setQuantity] = useState('');
+  const [salePrice, setSalePrice] = useState(h.price != null ? String(h.price) : '');
+  const [charges, setCharges] = useState('');
+  const [saleDate, setSaleDate] = useState(todayIST());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const qty = Number(quantity);
+  const sp = Number(salePrice);
+  const fee = Number(charges) || 0;
+  const valid = qty > 0 && qty <= h.quantity && sp > 0 && fee >= 0;
+
+  // Cost of the shares being sold: whole purchases first (oldest), then a share of the next one.
+  const preview = useMemo(() => {
+    if (!valid) return null;
+    let left = qty;
+    let cost = 0;
+    for (const l of h.lots ?? []) {
+      if (left <= 0) break;
+      const take = Math.min(l.quantity, left);
+      cost += (l.invested * take) / l.quantity;
+      left -= take;
+    }
+    const proceeds = qty * sp;
+    const realised = proceeds - fee - cost;
+    return { cost, proceeds, realised, realisedPct: cost > 0 ? (realised / cost) * 100 : null, closes: qty >= h.quantity };
+  }, [valid, qty, sp, fee, h.lots, h.quantity]);
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await api.sell(h.id, { quantity: qty, salePrice: sp, charges: fee, saleDate });
+      onDone(h.symbol, qty);
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <tr className="sell-row">
+      <td colSpan={8}>
+        <div className="sell-panel">
+          <div className="sell-head">
+            <strong>Sell {h.symbol}</strong>
+            <span className="muted small">You hold {h.quantity} shares · average cost {price(h.invested / h.quantity)} · oldest purchases are sold first</span>
+          </div>
+          <div className="row">
+            <label className="field">Shares to sell
+              <span className="with-link">
+                <input type="number" min="0" max={h.quantity} step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} autoFocus />
+                <button type="button" className="link" onClick={() => setQuantity(String(h.quantity))}>All {h.quantity}</button>
+              </span>
+            </label>
+            <label className="field">Sale price per share (₹)
+              <input type="number" min="0" step="any" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} />
+            </label>
+            <label className="field">Charges, optional (₹)
+              <input type="number" min="0" step="any" placeholder="brokerage, STT…" value={charges} onChange={(e) => setCharges(e.target.value)} />
+            </label>
+            <label className="field">Sale date
+              <input type="date" max={todayIST()} value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
+            </label>
+          </div>
+          {quantity !== '' && qty > h.quantity && <div className="error" role="alert">You only hold {h.quantity} shares.</div>}
+          {preview && (
+            <div className="sell-preview" aria-live="polite">
+              <div><span className="muted small">You receive</span><strong>{money(preview.proceeds - fee)}</strong></div>
+              <div><span className="muted small">Cost of these shares</span><strong>{money(preview.cost)}</strong></div>
+              <div>
+                <span className="muted small">{preview.realised >= 0 ? 'Profit booked' : 'Loss booked'}</span>
+                <strong className={tone(preview.realised)}>{signedMoney(preview.realised)} <span className="small">({pct(preview.realisedPct)})</span></strong>
+              </div>
+              <div><span className="muted small">Left after sale</span><strong>{preview.closes ? 'Nothing — position closes' : `${Math.round((h.quantity - qty) * 10000) / 10000} shares`}</strong></div>
+            </div>
+          )}
+          {error && <div className="error" role="alert">{error}</div>}
+          <div className="actions">
+            <button className="primary" onClick={submit} disabled={!preview || busy}>{busy ? 'Saving…' : 'Confirm sale'}</button>
+            <button onClick={onCancel} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function Row({ h, onChanged, onSell, selling }) {
   const [editing, setEditing] = useState(false);
   const [open, setOpen] = useState(false);
   const multi = (h.lots?.length ?? 0) > 1; // bought on several occasions: edit each purchase on its own
@@ -296,6 +388,7 @@ function Row({ h, onChanged }) {
         </>
       )}
       <td className="r nowrap">
+        <button onClick={onSell} aria-expanded={selling}>Sell</button>{' '}
         {multi
           ? <button onClick={() => setOpen(!open)} aria-expanded={open}>{open ? 'Hide' : 'Purchases'} ({h.lots.length})</button>
           : !editing && <button onClick={() => setEditing(true)}>Edit</button>}{' '}
@@ -304,6 +397,129 @@ function Row({ h, onChanged }) {
     </tr>
     {multi && open && h.lots.map((l) => <LotRow key={`${l.id}-${l.quantity}-${l.invested}-${l.purchase_date}`} h={h} lot={l} onChanged={onChanged} />)}
     </>
+  );
+}
+
+/** Inline form to correct a recorded sale. The server undoes the old sale and applies the new one in one step. */
+function EditSaleRow({ s, onDone, onCancel }) {
+  const [quantity, setQuantity] = useState(String(s.quantity));
+  const [salePrice, setSalePrice] = useState(String(s.salePrice));
+  const [charges, setCharges] = useState(s.charges ? String(s.charges) : '');
+  const [saleDate, setSaleDate] = useState(s.saleDate);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const qty = Number(quantity);
+  const sp = Number(salePrice);
+  const fee = Number(charges) || 0;
+  const valid = qty > 0 && sp > 0 && fee >= 0 && !!saleDate;
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const r = await api.updateSale(s.id, { quantity: qty, salePrice: sp, charges: fee, saleDate });
+      onDone(`Sale of ${s.symbol} updated.${r.reopened ? ' The stock is back in your holdings.' : ''}`);
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <tr className="sell-row">
+      <td colSpan={8}>
+        <div className="sell-panel">
+          <div className="sell-head">
+            <strong>Edit sale of {s.symbol}</strong>
+            <span className="muted small">Saving puts the old sale back first, then records the new figures.</span>
+          </div>
+          <div className="row">
+            <label className="field">Shares sold
+              <input type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} autoFocus />
+            </label>
+            <label className="field">Sale price per share (₹)
+              <input type="number" min="0" step="any" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} />
+            </label>
+            <label className="field">Charges (₹)
+              <input type="number" min="0" step="any" value={charges} onChange={(e) => setCharges(e.target.value)} />
+            </label>
+            <label className="field">Sale date
+              <input type="date" max={todayIST()} value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
+            </label>
+          </div>
+          {error && <div className="error" role="alert">{error}</div>}
+          <div className="actions">
+            <button className="primary" onClick={submit} disabled={!valid || busy}>{busy ? 'Saving…' : 'Save changes'}</button>
+            <button onClick={onCancel} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/** Everything sold so far, newest first, with the profit or loss booked on each sale. */
+function SalesHistory({ sales, onChanged, onMessage }) {
+  const [editingId, setEditingId] = useState(null);
+  if (!sales || !sales.items.length) return null;
+  const { totals } = sales;
+
+  const remove = async (s) => {
+    if (!window.confirm(`Remove this sale of ${s.quantity} ${s.symbol}? The shares go back into your holdings.`)) return;
+    try {
+      const r = await api.removeSale(s.id);
+      onMessage({ ok: true, text: `Sale removed.${r.reopened ? ` ${s.symbol} is back in your holdings.` : ' The shares are back in your holdings.'}` });
+      await onChanged();
+    } catch (e) {
+      onMessage({ ok: false, text: e.message });
+    }
+  };
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Sales history <span className="muted">({totals.count} {totals.count === 1 ? 'sale' : 'sales'})</span></h2>
+        <div className="sell-total">
+          <span className="muted small">Total profit booked</span>
+          <strong className={tone(totals.realised)}>{signedMoney(totals.realised)}</strong>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Sold on</th><th>Stock</th><th className="r">Qty</th><th className="r">Sale price</th>
+              <th className="r">Received</th><th className="r">Cost</th><th className="r">Profit booked</th><th />
+            </tr>
+          </thead>
+          <tbody>
+            {sales.items.map((s) => (
+              <Fragment key={s.id}>
+                <tr>
+                  <td className="nowrap">{niceDate(s.saleDate)}</td>
+                  <td><strong>{s.symbol}</strong><div className="muted small">{s.name}</div></td>
+                  <td className="r">{s.quantity}</td>
+                  <td className="r">{price(s.salePrice)}</td>
+                  <td className="r">{money(s.proceeds - s.charges)}{s.charges > 0 && <div className="muted small">after {money(s.charges)} charges</div>}</td>
+                  <td className="r">{money(s.costBasis)}</td>
+                  <td className={`r ${tone(s.realised)}`}>{signedMoney(s.realised)} <span className="small">({pct(s.realisedPct)})</span></td>
+                  <td className="nowrap">
+                    <button onClick={() => setEditingId(editingId === s.id ? null : s.id)} aria-expanded={editingId === s.id}>Edit</button>{' '}
+                    <button className="danger" onClick={() => remove(s)}>Remove</button>
+                  </td>
+                </tr>
+                {editingId === s.id && (
+                  <EditSaleRow
+                    s={s}
+                    onCancel={() => setEditingId(null)}
+                    onDone={async (text) => { setEditingId(null); onMessage({ ok: true, text }); await onChanged(); }}
+                  />
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -438,15 +654,24 @@ export default function Holdings({ onChange }) {
   const [rows, setRows] = useState(new Map());
   const [preview, setPreview] = useState(null); // an uploaded statement awaiting confirmation
   const [message, setMessage] = useState(null); // { ok, text }
+  const [sellingId, setSellingId] = useState(null); // holding whose sell form is open
+  const [sales, setSales] = useState(null);
 
   const load = async () => {
-    const [h, r] = await Promise.all([api.holdings(), api.report('1w')]);
+    const [h, r, s] = await Promise.all([api.holdings(), api.report('1w'), api.sales()]);
     setHoldings(h);
     setRows(new Map(r.holdings.map((x) => [x.symbol, x])));
+    setSales(s);
   };
   useEffect(() => { load().catch(() => {}); }, []);
 
   const changed = async () => { await load(); onChange(); };
+
+  const sold = async (symbol, qty) => {
+    setSellingId(null);
+    setMessage({ ok: true, text: `Sale recorded: ${qty} ${symbol} sold. The profit is in Sales history below.` });
+    await changed();
+  };
 
   const imported = async (r) => {
     setPreview(null);
@@ -497,12 +722,18 @@ export default function Holdings({ onChange }) {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((h) => <Row key={h.id} h={h} onChanged={changed} />)}
+                {sorted.map((h) => (
+                  <Fragment key={h.id}>
+                    <Row h={h} onChanged={changed} selling={sellingId === h.id} onSell={() => setSellingId(sellingId === h.id ? null : h.id)} />
+                    {sellingId === h.id && <SellRow h={h} onDone={sold} onCancel={() => setSellingId(null)} />}
+                  </Fragment>
+                ))}
               </tbody>
             </table>
           </div>
         )}
       </section>
+      <SalesHistory sales={sales} onChanged={changed} onMessage={setMessage} />
     </>
   );
 }

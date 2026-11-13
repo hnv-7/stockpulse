@@ -51,6 +51,32 @@ INSERT INTO holding_lots (holding_id, user_id, quantity, invested, purchase_date
   SELECT h.id, h.user_id, h.quantity, h.invested, h.purchase_date, h.created_at FROM holdings h
   WHERE NOT EXISTS (SELECT 1 FROM holding_lots l WHERE l.holding_id = h.id);
 
+-- A sale of (part of) a stock. Kept after the shares are gone, so it has no foreign key to holdings: a fully sold
+-- stock leaves the holdings table but its sales stay. cost_basis is what the sold shares cost (oldest purchases first).
+CREATE TABLE IF NOT EXISTS sales (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  symbol     TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  quantity   DOUBLE PRECISION NOT NULL CHECK (quantity > 0),
+  sale_price DOUBLE PRECISION NOT NULL CHECK (sale_price > 0),
+  charges    DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (charges >= 0),
+  cost_basis DOUBLE PRECISION NOT NULL CHECK (cost_basis >= 0),
+  sale_date  DATE NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sales_user ON sales (user_id, sale_date DESC, id DESC);
+
+-- Which purchases a sale used up (and what they cost), so removing or editing the sale can give them back exactly.
+CREATE TABLE IF NOT EXISTS sale_lots (
+  id            BIGSERIAL PRIMARY KEY,
+  sale_id       BIGINT NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+  quantity      DOUBLE PRECISION NOT NULL CHECK (quantity > 0),
+  invested      DOUBLE PRECISION NOT NULL CHECK (invested >= 0),
+  purchase_date DATE
+);
+CREATE INDEX IF NOT EXISTS idx_sale_lots_sale ON sale_lots (sale_id);
+
 CREATE TABLE IF NOT EXISTS daily_prices (
   symbol TEXT NOT NULL,
   date   DATE NOT NULL,

@@ -224,6 +224,14 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
         <Stat label="Current value" value={money(totals.value)} />
         <Stat label="Overall profit" value={signedMoney(totals.pnl)} sub={pct(totals.pnlPct)} cls={tone(totals.pnl)} />
         <Stat label="XIRR (annualised)" value={pct(totals.xirrPct)} sub={xirrSub(totals.xirrCoverage)} cls={tone(totals.xirrPct)} />
+        {report.realised?.count > 0 && (
+          <Stat
+            label="Profit booked (sold)"
+            value={signedMoney(report.realised.realised)}
+            sub={`${report.realised.count} ${report.realised.count === 1 ? 'sale' : 'sales'} · ${money(report.realised.proceeds - report.realised.charges)} received`}
+            cls={tone(report.realised.realised)}
+          />
+        )}
         <Stat
           label={PERIOD_LABEL[period]}
           value={signedMoney(totals.changeValue)}

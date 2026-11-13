@@ -37,6 +37,13 @@ const holdingSchema = z.object({
   merge: z.boolean().optional(),
 });
 const holdingUpdateSchema = z.object({ quantity: positive, invested: positive, purchaseDate: purchaseDateSchema });
+const sellSchema = z.object({
+  quantity: positive,
+  salePrice: positive,
+  // Brokerage, STT and other charges on the sale; reduces the profit.
+  charges: z.number().finite().min(0).max(1e12).default(0),
+  saleDate: z.string().refine(isPastOrToday, 'sale date must be a valid date, not in the future'),
+});
 const ruleSchema = z.object({
   symbol: symbolSchema.nullable().optional(),
   window: z.enum(['1d', '1w', '1m', 'high52']),
@@ -287,6 +294,46 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     res.status(204).end();
   });
 
+  // ---------- sales ----------
+  // Sell some or all shares of a stock. Purchases are used oldest first; a fully sold stock leaves the holdings
+  // and its sale stays in the history.
+  const saleFailure = (out) => {
+    if (out.status === 'missing') throw new HttpError(404, 'not found');
+    if (out.status === 'cap') throw new HttpError(400, `you can track up to ${config.maxHoldingsPerUser} stocks, so this stock cannot come back to your holdings`);
+    if (out.status === 'too_many') throw new HttpError(400, `you only hold ${out.held} shares`);
+    if (out.status === 'before_purchase') {
+      throw new HttpError(400, `the sale date is before a purchase made on ${out.date} (shares are sold oldest first)`);
+    }
+  };
+
+  api.post('/holdings/:id/sell', limiter(60_000, 30), async (req, res) => {
+    const body = parse(sellSchema, req.body);
+    const out = await store.sellShares(req.session.user.id, parseId(req.params.id), body);
+    saleFailure(out);
+    res.json({ sale: out.sale, holding: out.holding, closed: out.holding === null });
+  });
+
+  // Fix a mistake in a sale: the shares go back to your holding and are sold again with the new figures.
+  // Either all of it happens or none of it.
+  api.put('/sales/:id', limiter(60_000, 30), async (req, res) => {
+    const body = parse(sellSchema, req.body);
+    const out = await store.updateSale(req.session.user.id, parseId(req.params.id), body, { maxHoldings: config.maxHoldingsPerUser });
+    saleFailure(out);
+    res.json({ sale: out.sale, holding: out.holding, closed: out.holding === null });
+  });
+
+  // Delete a sale: the shares it sold return to your holding with their original cost and purchase dates.
+  api.delete('/sales/:id', limiter(60_000, 30), async (req, res) => {
+    const out = await store.removeSale(req.session.user.id, parseId(req.params.id), { maxHoldings: config.maxHoldingsPerUser });
+    saleFailure(out);
+    res.json({ holding: out.holding, reopened: out.reopened });
+  });
+
+  api.get('/sales', async (req, res) => {
+    const userId = req.session.user.id;
+    res.json({ totals: await store.salesTotals(userId), items: await store.listSales(userId) });
+  });
+
   // ---------- reports ----------
   async function loadAll(userId, period) {
     const holdings = await store.listHoldings(userId);
@@ -308,7 +355,7 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const ctx = await loadAll(req.session.user.id, period);
     const report = buildReport(ctx);
     const asOf = await store.lastSnapshotTs(ctx.holdings.map((h) => h.symbol));
-    res.json({ ...report, asOf });
+    res.json({ ...report, asOf, realised: await store.salesTotals(req.session.user.id) });
   });
 
   api.get('/portfolio/history', async (req, res) => {
