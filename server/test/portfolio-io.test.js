@@ -148,6 +148,66 @@ test('purchase date fills in the missing quantity or amount from that day\'s clo
   }
 });
 
+test('buying the same stock again keeps each purchase with its own date; each can be edited or removed', async () => {
+  const t = await setup();
+  try {
+    const u = await t.login('lots@example.test');
+    let r = await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 10, invested: 1000, purchaseDate: '2024-01-10' });
+    assert.equal(r.status, 201);
+    const id = r.body.id;
+    assert.equal(r.body.lots.length, 1);
+
+    assert.equal((await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 5, invested: 600, purchaseDate: '2025-06-01' })).status, 409, 'needs the user to agree');
+
+    r = await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 5, invested: 600, purchaseDate: '2025-06-01', merge: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.merged, true);
+    assert.equal(r.body.quantity, 15);
+    assert.equal(r.body.invested, 1600);
+    assert.equal(r.body.purchase_date, '2024-01-10', 'earliest purchase date');
+    assert.deepEqual(r.body.lots.map((l) => [l.quantity, l.invested, l.purchase_date]), [[10, 1000, '2024-01-10'], [5, 600, '2025-06-01']]);
+
+    // A purchase made before the first one becomes the earliest.
+    r = await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 1, invested: 50, purchaseDate: '2023-02-02', merge: true });
+    assert.equal(r.body.purchase_date, '2023-02-02');
+    assert.equal(r.body.lots.length, 3);
+
+    // Edit one purchase's date and amount: totals follow.
+    const second = r.body.lots.find((l) => l.purchase_date === '2025-06-01');
+    r = await u.call('PUT', `/api/holdings/${id}/lots/${second.id}`, { quantity: 4, invested: 500, purchaseDate: '2025-07-01' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.quantity, 15);
+    assert.equal(r.body.invested, 1550);
+    assert.ok(r.body.lots.some((l) => l.purchase_date === '2025-07-01'));
+    assert.equal((await u.call('PUT', `/api/holdings/${id}/lots/999999`, { quantity: 1, invested: 1 })).status, 404);
+    assert.equal((await u.call('PUT', `/api/holdings/${id}/lots/${second.id}`, { quantity: 1, invested: 1, purchaseDate: '2999-01-01' })).status, 400);
+
+    // Remove one purchase: totals and earliest date follow. The last one cannot be removed.
+    const earliest = r.body.lots.find((l) => l.purchase_date === '2023-02-02');
+    r = await u.call('DELETE', `/api/holdings/${id}/lots/${earliest.id}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.quantity, 14);
+    assert.equal(r.body.invested, 1500);
+    assert.equal(r.body.purchase_date, '2024-01-10');
+    const rest = r.body.lots;
+    assert.equal((await u.call('DELETE', `/api/holdings/${id}/lots/${rest[0].id}`)).status, 200);
+    assert.equal((await u.call('DELETE', `/api/holdings/${id}/lots/${rest[1].id}`)).status, 400, 'only purchase left');
+
+    // Another user cannot touch these purchases.
+    const other = await t.login('other-lots@example.test');
+    assert.equal((await other.call('PUT', `/api/holdings/${id}/lots/${rest[1].id}`, { quantity: 1, invested: 1 })).status, 404);
+    assert.equal((await other.call('DELETE', `/api/holdings/${id}/lots/${rest[1].id}`)).status, 404);
+
+    // The single-purchase edit still works and leaves one purchase.
+    r = await u.call('PUT', `/api/holdings/${id}`, { quantity: 3, invested: 300, purchaseDate: '2024-05-05' });
+    assert.equal(r.body.lots.length, 1);
+    assert.equal(r.body.lots[0].purchase_date, '2024-05-05');
+  } finally {
+    await t.close();
+  }
+});
+
+
 
 // ---------- export ----------
 test('export is a CSV that previews back to the same holdings', async () => {

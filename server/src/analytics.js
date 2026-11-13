@@ -98,7 +98,12 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
     const periodChangeValue = value != null && refValue != null ? value - refValue : null;
     const hi = price == null ? null : high52(series, today, price);
     const daysHeld = h.purchase_date ? daysBetween(h.purchase_date, today) : null;
-    const rate = daysHeld != null && value != null ? xirr([{ invested: h.invested, days: daysHeld }], value) : null;
+    // One cash flow per purchase. XIRR needs every purchase dated, otherwise part of the money has no date.
+    const lots = h.lots?.length ? h.lots : [{ invested: h.invested, purchase_date: h.purchase_date }];
+    const lotFlows = lots.every((l) => l.purchase_date)
+      ? lots.map((l) => ({ invested: l.invested, days: daysBetween(l.purchase_date, today) }))
+      : null;
+    const rate = lotFlows && value != null ? xirr(lotFlows, value) : null;
 
     return {
       symbol: h.symbol,
@@ -107,7 +112,8 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
       invested: h.invested,
       avgCost: h.invested / h.quantity,
       purchaseDate: h.purchase_date ?? null,
-      daysHeld,
+      daysHeld: lotFlows ? daysHeld : null,
+      purchases: lots.length,
       xirrPct: rate == null ? null : rate * 100,
       price,
       value,
@@ -135,10 +141,17 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
   const pnlPct = invested > 0 ? (pnl / invested) * 100 : null;
 
   // Portfolio XIRR uses only holdings that have both a purchase date and a price; coverage says how much that is.
-  const dated = rows.filter((r) => r.daysHeld != null && r.value != null);
+  const flowsBySymbol = new Map();
+  for (const h of holdings) {
+    const lots = h.lots?.length ? h.lots : [{ invested: h.invested, purchase_date: h.purchase_date }];
+    if (lots.every((l) => l.purchase_date)) {
+      flowsBySymbol.set(h.symbol, lots.map((l) => ({ invested: l.invested, days: daysBetween(l.purchase_date, today) })));
+    }
+  }
+  const dated = rows.filter((r) => flowsBySymbol.has(r.symbol) && r.value != null);
   const datedValue = dated.reduce((s, r) => s + r.value, 0);
   const datedInvested = dated.reduce((s, r) => s + r.invested, 0);
-  const portfolioRate = xirr(dated.map((r) => ({ invested: r.invested, days: r.daysHeld })), datedValue);
+  const portfolioRate = xirr(dated.flatMap((r) => flowsBySymbol.get(r.symbol)), datedValue);
   const xirrCoverage = { holdings: dated.length, of: rows.length, investedPct: invested > 0 ? (datedInvested / invested) * 100 : null };
 
   for (const r of rows) {
