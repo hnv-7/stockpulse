@@ -117,6 +117,31 @@ test('buildReport: per-stock and portfolio XIRR use purchase dates, undated hold
   assert.ok(Math.abs(r.totals.xirrCoverage.investedPct - 40) < 1e-9);
 });
 
+
+test('buildReport: XIRR uses one cash flow per purchase, and any undated purchase leaves the stock out', () => {
+  const run = (lots) =>
+    buildReport({
+      holdings: [{ symbol: 'A', name: 'A', quantity: 20, invested: 2000, purchase_date: '2025-11-06', lots }],
+      seriesBySymbol: new Map([['A', []]]),
+      latestBySymbol: new Map([['A', 150]]), // worth 3000
+      today: TODAY,
+      period: '1w',
+    });
+  // 1000 held 365 days + 1000 held 0 days, now 3000: 1000(1+r)+1000 = 3000 -> r = 100% (a single flow of 2000 would be 50%)
+  const two = run([
+    { invested: 1000, purchase_date: '2025-11-06' },
+    { invested: 1000, purchase_date: TODAY },
+  ]);
+  assert.ok(Math.abs(two.holdings[0].xirrPct - 100) < 1e-4);
+  assert.equal(two.holdings[0].purchases, 2);
+  assert.ok(Math.abs(two.totals.xirrPct - 100) < 1e-4);
+
+  const undated = run([{ invested: 1000, purchase_date: '2025-11-06' }, { invested: 1000, purchase_date: null }]);
+  assert.equal(undated.holdings[0].xirrPct, null);
+  assert.equal(undated.holdings[0].daysHeld, null);
+  assert.equal(undated.totals.xirrCoverage.holdings, 0);
+});
+
 test('buildReport: no dated holdings means no XIRR rather than a made-up number', () => {
   const r = buildReport({
     holdings: [{ symbol: 'A', name: 'A', quantity: 1, invested: 100 }],

@@ -33,6 +33,8 @@ const holdingSchema = z.object({
   quantity: positive.optional(),
   invested: positive.optional(),
   purchaseDate: purchaseDateSchema,
+  // Set once the user has agreed to add this purchase to a stock they already hold.
+  merge: z.boolean().optional(),
 });
 const holdingUpdateSchema = z.object({ quantity: positive, invested: positive, purchaseDate: purchaseDateSchema });
 const ruleSchema = z.object({
@@ -217,14 +219,14 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
 
   api.post('/holdings', limiter(60_000, 20), async (req, res) => {
     const userId = req.session.user.id;
-    const { symbol, quantity: qtyIn, invested: investedIn, purchaseDate } = parse(holdingSchema, req.body);
+    const { symbol, quantity: qtyIn, invested: investedIn, purchaseDate, merge } = parse(holdingSchema, req.body);
     if (!qtyIn && !investedIn) throw new HttpError(400, 'enter the quantity, the amount invested, or both');
-    if ((await store.countHoldings(userId)) >= config.maxHoldingsPerUser) {
-      throw new HttpError(400, `you can track up to ${config.maxHoldingsPerUser} stocks`);
+    const current = (await store.listHoldings(userId)).find((h) => h.symbol === symbol);
+    if (current && !merge) {
+      throw new HttpError(409, 'stock already in portfolio — confirm to add this purchase to the existing holding');
     }
-    const existing = await store.listHoldings(userId);
-    if (existing.some((h) => h.symbol === symbol)) {
-      throw new HttpError(409, 'stock already in portfolio — edit it instead');
+    if (!current && (await store.countHoldings(userId)) >= config.maxHoldingsPerUser) {
+      throw new HttpError(400, `you can track up to ${config.maxHoldingsPerUser} stocks`);
     }
     const quote = await lookupQuote(symbol).catch(() => null);
     if (!quote) throw new HttpError(404, 'symbol not found (use NSE/BSE format, e.g. INFY.NS)');
@@ -241,6 +243,14 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       if (!(quantity > 0) || !(invested > 0)) throw new HttpError(400, 'amount is too small to buy any shares on that date');
     }
 
+    if (current) {
+      // Another buy of a stock already held: record it as its own purchase (with its own date).
+      const merged = await store.addLot(userId, current.id, { quantity, invested, purchaseDate: purchaseDate ?? null });
+      if (!merged) throw new HttpError(404, 'not found');
+      return res.json({ ...merged, merged: true, ...(priceOn ? { priceOn } : {}) });
+    }
+    // First purchase of this stock: create the holding.
+
     const holding = await store.addHolding(userId, { symbol, name: quote.name, quantity, invested, purchaseDate: purchaseDate ?? null });
     // History is shared between users, so only fetch it if nobody holds this symbol yet.
     const have = (await store.getSeriesMany([symbol], addDays(istDate(), -60))).get(symbol);
@@ -255,6 +265,21 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const updated = await store.updateHolding(req.session.user.id, id, body);
     if (!updated) throw new HttpError(404, 'not found');
     res.json(updated);
+  });
+
+  // Edit or remove one purchase of a stock; the stock's totals follow.
+  api.put('/holdings/:id/lots/:lotId', async (req, res) => {
+    const body = parse(holdingUpdateSchema, req.body);
+    const updated = await store.updateLot(req.session.user.id, parseId(req.params.id), parseId(req.params.lotId), body);
+    if (!updated) throw new HttpError(404, 'not found');
+    res.json(updated);
+  });
+
+  api.delete('/holdings/:id/lots/:lotId', async (req, res) => {
+    const out = await store.removeLot(req.session.user.id, parseId(req.params.id), parseId(req.params.lotId));
+    if (out.status === 'missing') throw new HttpError(404, 'not found');
+    if (out.status === 'last') throw new HttpError(400, 'this is the only purchase — remove the stock instead');
+    res.json(out.holding);
   });
 
   api.delete('/holdings/:id', async (req, res) => {

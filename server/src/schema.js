@@ -34,6 +34,23 @@ CREATE INDEX IF NOT EXISTS idx_holdings_symbol ON holdings (symbol);
 -- Optional: when the user bought the stock. Added later, so it is an idempotent ALTER.
 ALTER TABLE holdings ADD COLUMN IF NOT EXISTS purchase_date DATE;
 
+-- Each purchase of a stock is a lot with its own date. holdings.quantity / invested / purchase_date are the
+-- totals (and earliest date) of its lots, kept in step by the store.
+CREATE TABLE IF NOT EXISTS holding_lots (
+  id            BIGSERIAL PRIMARY KEY,
+  holding_id    BIGINT NOT NULL REFERENCES holdings(id) ON DELETE CASCADE,
+  user_id       BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  quantity      DOUBLE PRECISION NOT NULL CHECK (quantity > 0),
+  invested      DOUBLE PRECISION NOT NULL CHECK (invested > 0),
+  purchase_date DATE,
+  created_at    BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lots_holding ON holding_lots (holding_id);
+-- Holdings that predate lots become a single lot.
+INSERT INTO holding_lots (holding_id, user_id, quantity, invested, purchase_date, created_at)
+  SELECT h.id, h.user_id, h.quantity, h.invested, h.purchase_date, h.created_at FROM holdings h
+  WHERE NOT EXISTS (SELECT 1 FROM holding_lots l WHERE l.holding_id = h.id);
+
 CREATE TABLE IF NOT EXISTS daily_prices (
   symbol TEXT NOT NULL,
   date   DATE NOT NULL,

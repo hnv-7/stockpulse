@@ -17,6 +17,7 @@ function AddForm({ onAdded }) {
   const [purchaseDate, setPurchaseDate] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [duplicate, setDuplicate] = useState(null); // symbol already held, awaiting the user's OK to add to it
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState(-1); // highlighted suggestion, -1 = none
   const timer = useRef();
@@ -27,6 +28,7 @@ function AddForm({ onAdded }) {
 
   const onQuery = (v) => {
     setQuery(v);
+    setDuplicate(null);
     setPicked(null);
     setActive(-1);
     clearTimeout(timer.current);
@@ -66,8 +68,8 @@ function AddForm({ onAdded }) {
     }
   };
 
-  const submit = async (e) => {
-    e.preventDefault();
+  const submit = async (e, merge = false) => {
+    e?.preventDefault();
     setError('');
     setNotice('');
     const symbol = picked?.symbol ?? query.trim().toUpperCase();
@@ -78,18 +80,23 @@ function AddForm({ onAdded }) {
         ...(quantity ? { quantity: Number(quantity) } : {}),
         ...(invested ? { invested: Number(invested) } : {}),
         ...(purchaseDate ? { purchaseDate } : {}),
+        ...(merge ? { merge: true } : {}),
       });
-      if (added.priceOn) {
+      if (added.merged) {
+        setNotice(`${symbol} updated: you now hold ${added.quantity} shares for ${money(added.invested)} in total.`);
+      } else if (added.priceOn) {
         const { date, close } = added.priceOn;
         setNotice(
           `Added ${added.quantity} shares for ${money(added.invested)}, using the closing price of ${money(close)} on ${niceDate(date)}` +
           `${date !== purchaseDate ? ` (the last trading day on or before ${niceDate(purchaseDate)})` : ''}.`,
         );
       }
+      setDuplicate(null);
       setQuery(''); setResults([]); setPicked(null); setQuantity(''); setInvested(''); setPurchaseDate('');
       onAdded();
     } catch (err) {
-      setError(err.message);
+      if (err.status === 409) setDuplicate(symbol);
+      else setError(err.message);
     } finally {
       setBusy(false);
     }
@@ -154,17 +161,93 @@ function AddForm({ onAdded }) {
       )}
       {notice && <div className="notice" role="status">{notice}</div>}
       {error && <div className="error" role="alert">{error}</div>}
-      <button className="primary" disabled={busy}>{busy ? 'Adding…' : 'Add to portfolio'}</button>
+      {duplicate && (
+        <div className="warn box" role="alert">
+          <strong>{duplicate}</strong> is already in your portfolio. Proceeding will add this purchase
+          {quantity ? ` (${quantity} shares)` : ''}{invested ? ` (${money(Number(invested))})` : ''} to your existing quantity and invested amount.
+          The average cost is recalculated{purchaseDate ? ', and the earliest purchase date is kept' : ''}.
+          <div className="actions">
+            <button type="button" className="primary" disabled={busy} onClick={() => submit(null, true)}>
+              {busy ? 'Updating…' : 'Proceed and update'}
+            </button>
+            <button type="button" disabled={busy} onClick={() => setDuplicate(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <button className="primary" disabled={busy || !!duplicate}>{busy ? 'Adding…' : 'Add to portfolio'}</button>
     </form>
+  );
+}
+
+/** One purchase of a stock, with its own date, quantity and amount. */
+function LotRow({ h, lot, onChanged }) {
+  const [editing, setEditing] = useState(false);
+  const [quantity, setQuantity] = useState(String(lot.quantity));
+  const [invested, setInvested] = useState(String(lot.invested));
+  const [purchaseDate, setPurchaseDate] = useState(lot.purchase_date ?? '');
+  const [error, setError] = useState('');
+
+  const save = async () => {
+    try {
+      await api.updateLot(h.id, lot.id, { quantity: Number(quantity), invested: Number(invested), purchaseDate: purchaseDate || null });
+      setEditing(false); setError('');
+      onChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+  const remove = async () => {
+    if (!window.confirm(`Remove this purchase of ${h.symbol}? Your totals will be recalculated.`)) return;
+    try {
+      await api.removeLot(h.id, lot.id);
+      onChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return (
+    <tr className="lot">
+      <td className="muted small">↳ Purchase</td>
+      {editing ? (
+        <>
+          <td className="r"><input className="narrow" type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} aria-label="Quantity" /></td>
+          <td className="r"><input className="narrow" type="number" min="0" step="any" value={invested} onChange={(e) => setInvested(e.target.value)} aria-label="Invested" /></td>
+          <td className="r"><input type="date" max={todayIST()} value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} aria-label="Purchase date" /></td>
+          <td colSpan={3} className="r">
+            {error && <span className="neg small">{error} </span>}
+            <button onClick={save}>Save</button> <button onClick={() => { setEditing(false); setError(''); }}>Cancel</button>
+          </td>
+        </>
+      ) : (
+        <>
+          <td className="r">{lot.quantity}</td>
+          <td className="r">{money(lot.invested)}</td>
+          <td className="r nowrap">{niceDate(lot.purchase_date)}</td>
+          <td colSpan={3} className="r">{error && <span className="neg small">{error}</span>}</td>
+        </>
+      )}
+      <td className="r nowrap">
+        {!editing && <button onClick={() => setEditing(true)}>Edit</button>} <button className="danger" onClick={remove}>Remove</button>
+      </td>
+    </tr>
   );
 }
 
 function Row({ h, onChanged }) {
   const [editing, setEditing] = useState(false);
+  const [open, setOpen] = useState(false);
+  const multi = (h.lots?.length ?? 0) > 1; // bought on several occasions: edit each purchase on its own
   const [quantity, setQuantity] = useState(String(h.quantity));
   const [invested, setInvested] = useState(String(h.invested));
   const [purchaseDate, setPurchaseDate] = useState(h.purchase_date ?? '');
   const [error, setError] = useState('');
+  // The row is keyed by id, so refresh the edit fields whenever the saved figures change.
+  useEffect(() => {
+    setQuantity(String(h.quantity)); setInvested(String(h.invested)); setPurchaseDate(h.purchase_date ?? '');
+  }, [h.quantity, h.invested, h.purchase_date]);
+
+
 
   const save = async () => {
     try {
@@ -186,6 +269,7 @@ function Row({ h, onChanged }) {
   };
 
   return (
+    <>
     <tr>
       <td><strong>{h.symbol}</strong><div className="muted small">{h.name}</div></td>
       {editing ? (
@@ -202,16 +286,24 @@ function Row({ h, onChanged }) {
         <>
           <td className="r">{h.quantity}</td>
           <td className="r">{money(h.invested)}</td>
-          <td className="r nowrap">{niceDate(h.purchase_date)}</td>
+          <td className="r nowrap">
+            {niceDate(h.purchase_date)}
+            {multi && <div className="muted small">earliest of {h.lots.length} purchases</div>}
+          </td>
           <td className="r">{h.value == null ? '—' : money(h.value)}</td>
           <td className={`r ${tone(h.pnl)}`}>{h.pnl == null ? '—' : <>{signedMoney(h.pnl)} <span className="small">({pct(h.pnlPct)})</span></>}</td>
           <td className="r">{price(h.price)}</td>
         </>
       )}
       <td className="r nowrap">
-        {!editing && <button onClick={() => setEditing(true)}>Edit</button>} <button className="danger" onClick={remove}>Remove</button>
+        {multi
+          ? <button onClick={() => setOpen(!open)} aria-expanded={open}>{open ? 'Hide' : 'Purchases'} ({h.lots.length})</button>
+          : !editing && <button onClick={() => setEditing(true)}>Edit</button>}{' '}
+        <button className="danger" onClick={remove}>Remove</button>
       </td>
     </tr>
+    {multi && open && h.lots.map((l) => <LotRow key={`${l.id}-${l.quantity}-${l.invested}-${l.purchase_date}`} h={h} lot={l} onChanged={onChanged} />)}
+    </>
   );
 }
 
@@ -380,7 +472,8 @@ export default function Holdings({ onChange }) {
           <ImportExport onPreview={(p) => { setMessage(null); setPreview(p); }} onMessage={setMessage} />
         </div>
         <p className="muted">
-          Update quantity and invested amount whenever you buy more (the average cost is invested ÷ quantity).
+          When you buy more of a stock you already hold, add it again with its purchase date: each purchase is kept separately and the totals
+          are worked out for you (the average cost is invested ÷ quantity).
           To load your portfolio from a broker, use <strong>Import statement</strong> with the holdings file you download from Groww, Zerodha, Dhan, Upstox, Angel One and similar
           (Excel, CSV, JSON or PDF). You can review everything before it is saved. Export CSV gives you a file you can edit and import back.
         </p>
@@ -404,7 +497,7 @@ export default function Holdings({ onChange }) {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((h) => <Row key={`${h.id}-${h.quantity}-${h.invested}-${h.purchase_date}`} h={h} onChanged={changed} />)}
+                {sorted.map((h) => <Row key={h.id} h={h} onChanged={changed} />)}
               </tbody>
             </table>
           </div>

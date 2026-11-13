@@ -49,6 +49,15 @@ test('holdings CRUD, validation, report, per-user caps', async () => {
     assert.equal(r.body.name, 'AAA.NS Ltd');
 
     assert.equal((await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 1, invested: 1 })).status, 409);
+    // After the user agrees, the new purchase is added to the existing holding (10 @ 1000 + 5 @ 600).
+    r = await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 5, invested: 600, merge: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.merged, true);
+    assert.equal(r.body.quantity, 15);
+    assert.equal(r.body.invested, 1600);
+    r = await u.call('GET', '/api/holdings');
+    assert.equal(r.body.filter((h) => h.symbol === 'AAA.NS').length, 1);
+    await u.call('PUT', `/api/holdings/${r.body.find((h) => h.symbol === 'AAA.NS').id}`, { quantity: 10, invested: 1000 });
     assert.equal((await u.call('POST', '/api/holdings', { symbol: 'NOPE.NS', quantity: 1, invested: 1 })).status, 404);
     assert.equal((await u.call('POST', '/api/holdings', { symbol: 'A; DROP TABLE users', quantity: 1, invested: 1 })).status, 400);
     assert.equal((await u.call('POST', '/api/holdings', { symbol: 'BBB.NS', quantity: -5, invested: 1 })).status, 400);

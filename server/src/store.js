@@ -25,6 +25,15 @@ const holding = (r) =>
     created_at: n(r.created_at),
   };
 
+const LOT_COLS = `id, holding_id, quantity, invested, to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date, created_at`;
+const lot = (r) => ({
+  id: n(r.id),
+  quantity: n(r.quantity),
+  invested: n(r.invested),
+  purchase_date: r.purchase_date ?? null,
+  created_at: n(r.created_at),
+});
+
 const rule = (r) =>
   r && {
     id: n(r.id),
@@ -42,6 +51,35 @@ const rule = (r) =>
 export function createStore(db) {
   const one = async (sql, params) => (await db.query(sql, params)).rows[0] ?? null;
   const many = async (sql, params) => (await db.query(sql, params)).rows;
+
+  /** Attach each holding's purchases (oldest first, undated last). `q` is db.query or a transaction's query. */
+  async function attachLots(q, holdings, userId) {
+    const rows = (
+      await q(`SELECT ${LOT_COLS} FROM holding_lots WHERE user_id = $1 ORDER BY purchase_date ASC NULLS LAST, id`, [userId])
+    ).rows;
+    const byHolding = new Map();
+    for (const r of rows) {
+      const k = n(r.holding_id);
+      if (!byHolding.has(k)) byHolding.set(k, []);
+      byHolding.get(k).push(lot(r));
+    }
+    return holdings.map((h) => ({ ...h, lots: byHolding.get(h.id) ?? [] }));
+  }
+  async function loadHolding(q, userId, id) {
+    const row = (await q(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 AND id = $2`, [userId, id])).rows[0];
+    return row ? (await attachLots(q, [holding(row)], userId))[0] : null;
+  }
+  /** Make the holding's totals and earliest date match its purchases. */
+  const resync = (q, holdingId) =>
+    q(
+      `UPDATE holdings h SET quantity = s.q, invested = s.i, purchase_date = s.d
+       FROM (SELECT ROUND(SUM(quantity)::numeric, 4)::double precision AS q,
+                    ROUND(SUM(invested)::numeric, 2)::double precision AS i,
+                    MIN(purchase_date) AS d
+             FROM holding_lots WHERE holding_id = $1) s
+       WHERE h.id = $1`,
+      [holdingId],
+    );
 
   return {
     // ---------- users & sessions ----------
@@ -94,34 +132,95 @@ export function createStore(db) {
     },
 
     // ---------- holdings ----------
+    // A holding is the total of its purchases (lots). holdings.quantity / invested / purchase_date always hold
+    // the lots' sum and earliest date, so reports keep reading the holding row.
     async listHoldings(userId) {
-      return (await many(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 ORDER BY symbol`, [userId])).map(holding);
+      return attachLots(db.query, (await many(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 ORDER BY symbol`, [userId])).map(holding), userId);
     },
     async countHoldings(userId) {
       return n((await one('SELECT COUNT(*) AS c FROM holdings WHERE user_id = $1', [userId])).c);
     },
     async getHolding(userId, id) {
-      return holding(await one(`SELECT ${HOLDING_COLS} FROM holdings WHERE user_id = $1 AND id = $2`, [userId, id]));
+      return loadHolding(db.query, userId, id);
     },
     async addHolding(userId, { symbol, name, quantity, invested, purchaseDate = null }) {
-      return holding(
-        await one(
-          `INSERT INTO holdings (user_id, symbol, name, quantity, invested, purchase_date, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6::date,$7) RETURNING ${HOLDING_COLS}`,
-          [userId, symbol, name, quantity, invested, purchaseDate, Date.now()],
-        ),
-      );
+      return db.tx(async (t) => {
+        const h = (
+          await t.query(
+            `INSERT INTO holdings (user_id, symbol, name, quantity, invested, purchase_date, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6::date,$7) RETURNING id`,
+            [userId, symbol, name, quantity, invested, purchaseDate, Date.now()],
+          )
+        ).rows[0];
+        await t.query(
+          `INSERT INTO holding_lots (holding_id, user_id, quantity, invested, purchase_date, created_at)
+           VALUES ($1,$2,$3,$4,$5::date,$6)`,
+          [h.id, userId, quantity, invested, purchaseDate, Date.now()],
+        );
+        return loadHolding(t.query, userId, h.id);
+      });
     },
-    /** purchaseDate: undefined keeps the stored date, null clears it, a YYYY-MM-DD string sets it. */
+    /**
+     * Overwrite the holding's totals; its purchases collapse into one. purchaseDate: undefined keeps the stored
+     * (earliest) date, null clears it, a YYYY-MM-DD string sets it. Used by the single-purchase edit and imports.
+     */
     async updateHolding(userId, id, { quantity, invested, purchaseDate }) {
-      return holding(
-        await one(
-          `UPDATE holdings SET quantity = $3, invested = $4,
-             purchase_date = CASE WHEN $5::boolean THEN $6::date ELSE purchase_date END
-           WHERE user_id = $1 AND id = $2 RETURNING ${HOLDING_COLS}`,
-          [userId, id, quantity, invested, purchaseDate !== undefined, purchaseDate ?? null],
-        ),
-      );
+      return db.tx(async (t) => {
+        const row = (
+          await t.query(
+            `UPDATE holdings SET quantity = $3, invested = $4,
+               purchase_date = CASE WHEN $5::boolean THEN $6::date ELSE purchase_date END
+             WHERE user_id = $1 AND id = $2 RETURNING to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date`,
+            [userId, id, quantity, invested, purchaseDate !== undefined, purchaseDate ?? null],
+          )
+        ).rows[0];
+        if (!row) return null;
+        await t.query('DELETE FROM holding_lots WHERE holding_id = $1', [id]);
+        await t.query(
+          `INSERT INTO holding_lots (holding_id, user_id, quantity, invested, purchase_date, created_at)
+           VALUES ($1,$2,$3,$4,$5::date,$6)`,
+          [id, userId, quantity, invested, row.purchase_date, Date.now()],
+        );
+        return loadHolding(t.query, userId, id);
+      });
+    },
+    /** Record another purchase of a stock already held. */
+    async addLot(userId, holdingId, { quantity, invested, purchaseDate = null }) {
+      return db.tx(async (t) => {
+        if (!(await t.query('SELECT 1 FROM holdings WHERE id = $1 AND user_id = $2', [holdingId, userId])).rows.length) return null;
+        await t.query(
+          `INSERT INTO holding_lots (holding_id, user_id, quantity, invested, purchase_date, created_at)
+           VALUES ($1,$2,$3,$4,$5::date,$6)`,
+          [holdingId, userId, quantity, invested, purchaseDate, Date.now()],
+        );
+        await resync(t.query, holdingId);
+        return loadHolding(t.query, userId, holdingId);
+      });
+    },
+    /** purchaseDate: undefined keeps the lot's date, null clears it. Returns the updated holding, or null. */
+    async updateLot(userId, holdingId, lotId, { quantity, invested, purchaseDate }) {
+      return db.tx(async (t) => {
+        const r = await t.query(
+          `UPDATE holding_lots SET quantity = $4, invested = $5,
+             purchase_date = CASE WHEN $6::boolean THEN $7::date ELSE purchase_date END
+           WHERE id = $1 AND holding_id = $2 AND user_id = $3`,
+          [lotId, holdingId, userId, quantity, invested, purchaseDate !== undefined, purchaseDate ?? null],
+        );
+        if (!r.rowCount) return null;
+        await resync(t.query, holdingId);
+        return loadHolding(t.query, userId, holdingId);
+      });
+    },
+    /** Remove one purchase. The last remaining purchase cannot be removed (remove the stock instead). */
+    async removeLot(userId, holdingId, lotId) {
+      return db.tx(async (t) => {
+        const lots = (await t.query('SELECT id FROM holding_lots WHERE holding_id = $1 AND user_id = $2', [holdingId, userId])).rows;
+        if (!lots.some((l) => n(l.id) === lotId)) return { status: 'missing' };
+        if (lots.length < 2) return { status: 'last' };
+        await t.query('DELETE FROM holding_lots WHERE id = $1', [lotId]);
+        await resync(t.query, holdingId);
+        return { status: 'ok', holding: await loadHolding(t.query, userId, holdingId) };
+      });
     },
     async removeHolding(userId, id) {
       return db.tx(async (t) => {
