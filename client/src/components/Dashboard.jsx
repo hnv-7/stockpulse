@@ -207,7 +207,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
     return (
       <section className="card empty">
         <h2>Add your first stock</h2>
-        <p>Enter each holding's quantity and the total amount you invested. StockPulse tracks prices and builds your reports from there.</p>
+        <p>Enter each holding's quantity and the total amount you invested. Stock Beat tracks prices and builds your reports from there.</p>
         <button className="primary" onClick={goToStocks}>Add stocks</button>
       </section>
     );

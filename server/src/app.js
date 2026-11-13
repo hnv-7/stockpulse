@@ -171,7 +171,7 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       holdings.map((h) => [h.symbol, h.name, h.quantity, h.invested, h.purchase_date]),
     );
     res.set('Content-Type', 'text/csv; charset=utf-8');
-    res.set('Content-Disposition', `attachment; filename="stockpulse-portfolio-${istDate()}.csv"`);
+    res.set('Content-Disposition', `attachment; filename="stockbeat-portfolio-${istDate()}.csv"`);
     res.send(csv);
   });
 

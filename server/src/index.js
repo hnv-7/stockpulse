@@ -5,7 +5,7 @@ const { app, config, db } = await buildApp();
 
 // Bind to loopback only; put a TLS-terminating reverse proxy in front if you expose it.
 const server = app.listen(config.port, config.host, () => {
-  console.log(JSON.stringify({ level: 'info', msg: 'StockPulse listening', host: config.host, port: config.port }));
+  console.log(JSON.stringify({ level: 'info', msg: 'Stock Beat listening', host: config.host, port: config.port }));
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

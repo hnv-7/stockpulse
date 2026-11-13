@@ -1,4 +1,4 @@
-# StockPulse
+# Stock Beat
 
 Track your Indian (NSE/BSE) stock portfolio, see which stocks are dragging it down, spot buy-the-dip
 opportunities, and get alerted when a stock falls by a percentage you choose.

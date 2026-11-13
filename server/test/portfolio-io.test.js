@@ -220,7 +220,7 @@ test('export is a CSV that previews back to the same holdings', async () => {
     const exp = await fetch(`${t.base}/api/holdings/export`, { headers: { cookie: u.session.cookie } });
     assert.equal(exp.status, 200);
     assert.match(exp.headers.get('content-type'), /text\/csv/);
-    assert.match(exp.headers.get('content-disposition'), /attachment; filename="stockpulse-portfolio-\d{4}-\d{2}-\d{2}\.csv"/);
+    assert.match(exp.headers.get('content-disposition'), /attachment; filename="stockbeat-portfolio-\d{4}-\d{2}-\d{2}\.csv"/);
     const csv = await exp.text();
     assert.equal(csv.split('\r\n')[0], 'Symbol,Name,Quantity,Invested,Purchase Date');
     assert.match(csv, /AAA\.NS,AAA\.NS Ltd,10,1000,2024-01-15/);

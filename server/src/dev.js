@@ -24,5 +24,5 @@ if (process.env.DEV_DEMO_USER === '1') {
 }
 
 app.listen(config.port, config.host, () => {
-  console.log(JSON.stringify({ level: 'info', msg: 'StockPulse dev server', host: config.host, port: config.port }));
+  console.log(JSON.stringify({ level: 'info', msg: 'Stock Beat dev server', host: config.host, port: config.port }));
 });

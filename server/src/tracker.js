@@ -55,7 +55,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
         if (!created) continue;
         fired++;
         if (user?.alertEmail && notifier) {
-          await notifier.sendEmail(user.email, `StockPulse alert: ${hit.holding.symbol}`, hit.message);
+          await notifier.sendEmail(user.email, `Stock Beat alert: ${hit.holding.symbol}`, hit.message);
         }
       }
     }
