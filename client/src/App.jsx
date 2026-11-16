@@ -63,13 +63,14 @@ function Portfolio({ me, setMe, onSignedOut }) {
 
   return (
     <div className="app">
+      <a className="skip" href="#main">Skip to content</a>
       <header className="topbar">
         <Brand />
-        <nav>
+        <nav aria-label="Main">
           {TABS.map(([id, label]) => (
-            <button key={id} className={tab === id ? 'tab active' : 'tab'} onClick={() => setTab(id)}>
+            <button key={id} className={tab === id ? 'tab active' : 'tab'} aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>
               {label}
-              {id === 'alerts' && unread > 0 && <span className="badge">{unread}</span>}
+              {id === 'alerts' && unread > 0 && <span className="badge">{unread}<span className="sr-only"> unread</span></span>}
             </button>
           ))}
         </nav>
@@ -83,7 +84,7 @@ function Portfolio({ me, setMe, onSignedOut }) {
 
       {error && <div className="error" role="alert">{error}</div>}
 
-      <main>
+      <main id="main" tabIndex={-1}>
         {tab === 'dashboard' && (
           <Dashboard report={report} period={period} setPeriod={setPeriod} goToStocks={() => setTab('holdings')} />
         )}

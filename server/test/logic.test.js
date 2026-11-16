@@ -167,6 +167,50 @@ test('portfolioHistory forward-fills and skips days before all stocks have data'
   assert.deepEqual(h.map((p) => [p.date, p.value]), [['2026-11-02', 21], ['2026-11-03', 24]]);
 });
 
+test('portfolioHistory counts each purchase from its date and sold shares until their sale date', () => {
+  const seriesBySymbol = new Map([
+    ['A', series([['2026-11-01', 10], ['2026-11-02', 11], ['2026-11-03', 12], ['2026-11-04', 13]])],
+    ['B', series([['2026-11-01', 5], ['2026-11-03', 6]])], // no close on the 2nd or 4th: carried forward
+  ]);
+  const holdings = [
+    // A: one purchase before the range and one inside it.
+    { symbol: 'A', quantity: 3, invested: 33, lots: [
+      { quantity: 1, invested: 9, purchase_date: '2026-10-20' },
+      { quantity: 2, invested: 24, purchase_date: '2026-11-03' },
+    ] },
+  ];
+  // B was held from before the range and fully sold on the 3rd.
+  const soldLots = [
+    { symbol: 'B', quantity: 4, invested: 16, purchase_date: '2026-10-01', sale_date: '2026-11-03' },
+    { symbol: 'B', quantity: 9, invested: 99, purchase_date: '2026-10-01', sale_date: '2026-10-31' }, // before the range
+  ];
+  const h = portfolioHistory({ holdings, soldLots, seriesBySymbol, fromDate: '2026-11-01' });
+  assert.deepEqual(h, [
+    { date: '2026-11-01', value: 1 * 10 + 4 * 5, invested: 9 + 16 },
+    { date: '2026-11-02', value: 1 * 11 + 4 * 5, invested: 9 + 16 },
+    { date: '2026-11-03', value: 3 * 12, invested: 33 }, // bought 2 more A, sold all of B
+    { date: '2026-11-04', value: 3 * 13, invested: 33 },
+  ]);
+});
+
+test('portfolioHistory starts at the first purchase in the range and shows zero once everything is sold', () => {
+  const seriesBySymbol = new Map([['A', series([['2026-11-01', 10], ['2026-11-02', 11], ['2026-11-03', 12]])]]);
+  const soldLots = [{ symbol: 'A', quantity: 2, invested: 20, purchase_date: '2026-11-02', sale_date: '2026-11-03' }];
+  const h = portfolioHistory({ holdings: [], soldLots, seriesBySymbol, fromDate: '2026-11-01' });
+  assert.deepEqual(h, [
+    { date: '2026-11-02', value: 22, invested: 20 },
+    { date: '2026-11-03', value: 0, invested: 0 },
+  ]);
+});
+
+test('portfolioHistory leaves out a stock with no prices instead of blanking the chart', () => {
+  const seriesBySymbol = new Map([['A', series([['2026-11-01', 10], ['2026-11-02', 11]])], ['GONE', []]]);
+  const holdings = [{ symbol: 'A', quantity: 1, invested: 10 }];
+  const soldLots = [{ symbol: 'GONE', quantity: 5, invested: 50, purchase_date: null, sale_date: '2026-11-05' }];
+  const h = portfolioHistory({ holdings, soldLots, seriesBySymbol, fromDate: '2026-11-01' });
+  assert.deepEqual(h.map((p) => [p.date, p.value, p.invested]), [['2026-11-01', 10, 10], ['2026-11-02', 11, 10]]);
+});
+
 test('evaluateRules fires only when the drop meets the threshold', () => {
   const holdings = [
     { symbol: 'A', quantity: 1, invested: 100 },

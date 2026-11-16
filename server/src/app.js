@@ -4,11 +4,12 @@ import { rateLimit } from 'express-rate-limit';
 import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { istDate, addDays } from './dates.js';
+import { istDate, addDays, isStale } from './dates.js';
 import { toCsv, importHoldings, isPastOrToday, MAX_IMPORT_ROWS } from './portfolio-io.js';
 import { previewImport } from './import-mapping.js';
 import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
 import { buildReport, portfolioHistory } from './analytics.js';
+import { suggestRatio } from './splits.js';
 import { getQuote, getCloseOn, searchSymbols } from './market.js';
 import { safeEqual } from './auth.js';
 
@@ -44,18 +45,39 @@ const sellSchema = z.object({
   charges: z.number().finite().min(0).max(1e12).default(0),
   saleDate: z.string().refine(isPastOrToday, 'sale date must be a valid date, not in the future'),
 });
-const ruleSchema = z.object({
+const dropRuleSchema = z.object({
+  kind: z.literal('drop').default('drop'),
   symbol: symbolSchema.nullable().optional(),
   window: z.enum(['1d', '1w', '1m', 'high52']),
   thresholdPct: z.number().finite().positive().lt(100),
 });
+// A price target needs a stock you hold, and a price to compare against.
+const priceRuleSchema = z.object({
+  kind: z.literal('price'),
+  symbol: symbolSchema,
+  direction: z.enum(['above', 'below']),
+  targetPrice: z.number().finite().positive().max(1e9),
+});
+const ruleSchema = z.union([priceRuleSchema, dropRuleSchema]);
 const ruleUpdateSchema = z.object({
-  thresholdPct: z.number().finite().positive().lt(100),
+  thresholdPct: z.number().finite().positive().lt(100).optional(),
+  targetPrice: z.number().finite().positive().max(1e9).optional(),
   enabled: z.boolean(),
 });
 const settingsSchema = z.object({ alertEmail: z.boolean() });
+// Every `denominator` shares became `numerator` (a 1:1 bonus is 2 for 1).
+const splitRatioSchema = z
+  .object({
+    numerator: z.number().finite().positive().max(1000),
+    denominator: z.number().finite().positive().max(1000),
+  })
+  .refine((r) => r.numerator !== r.denominator, 'a split must change the number of shares');
 
 const RANGE_DAYS = { '1m': 30, '3m': 90, '6m': 182, '1y': 365 };
+/** Sold stocks whose daily closes are missing are fetched again, at most this many per request... */
+const SOLD_BACKFILL_PER_REQUEST = 5;
+/** ...and a symbol is not retried more often than this (a delisted or merged stock may never come back). */
+const SOLD_BACKFILL_RETRY_MS = 6 * 3600 * 1000;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -334,6 +356,26 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     res.json({ totals: await store.salesTotals(userId), items: await store.listSales(userId) });
   });
 
+  // ---------- splits and bonus issues ----------
+  // Found by the poller; a user's shares only change when they confirm (with a ratio they can correct).
+  api.get('/splits', async (req, res) => {
+    const reviews = await store.listSplitReviews(req.session.user.id);
+    res.json(reviews.map((r) => ({ ...r, suggested: suggestRatio(r.reported, r.priceRatio) })));
+  });
+
+  api.post('/splits/:id/apply', limiter(60_000, 30), async (req, res) => {
+    const ratio = parse(splitRatioSchema, req.body);
+    const r = await store.applySplitReview(req.session.user.id, parseId(req.params.id), ratio);
+    if (r.status === 'missing') throw new HttpError(404, 'not found');
+    if (r.status === 'resolved') throw new HttpError(409, 'this split was already confirmed or dismissed');
+    res.json(r);
+  });
+
+  api.post('/splits/:id/dismiss', limiter(60_000, 30), async (req, res) => {
+    if (!(await store.dismissSplitReview(req.session.user.id, parseId(req.params.id)))) throw new HttpError(404, 'not found');
+    res.status(204).end();
+  });
+
   // ---------- reports ----------
   async function loadAll(userId, period) {
     const holdings = await store.listHoldings(userId);
@@ -354,14 +396,49 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const period = parse(periodSchema, req.query.period);
     const ctx = await loadAll(req.session.user.id, period);
     const report = buildReport(ctx);
-    const asOf = await store.lastSnapshotTs(ctx.holdings.map((h) => h.symbol));
-    res.json({ ...report, asOf, realised: await store.salesTotals(req.session.user.id) });
+    const symbols = ctx.holdings.map((h) => h.symbol);
+    const asOf = await store.lastSnapshotTs(symbols);
+    // Per stock: when its price was last fetched, and whether that is too old to call "current".
+    const fetchedAt = await store.lastSnapshotTsBySymbol(symbols);
+    const now = Date.now();
+    // Until a split is confirmed, the stock's quantity is in the old shares and its value is off.
+    const pendingSplits = await store.pendingSplits(req.session.user.id);
+    const splitPending = new Set(pendingSplits.map((p) => p.symbol));
+    const rows = report.holdings.map((r) => {
+      const priceAsOf = fetchedAt.get(r.symbol) ?? null;
+      return { ...r, priceAsOf, stale: r.price != null && isStale(priceAsOf, now), splitPending: splitPending.has(r.symbol) };
+    });
+    res.json({ ...report, holdings: rows, asOf, pendingSplits, realised: await store.salesTotals(req.session.user.id) });
   });
 
+  // symbol -> when its history was last fetched for the chart because it was missing (per server instance).
+  const soldBackfillTried = new Map();
+
   api.get('/portfolio/history', async (req, res) => {
+    const userId = req.session.user.id;
     const range = parse(z.enum(['1m', '3m', '6m', '1y']).default('3m'), req.query.range);
-    const ctx = await loadAll(req.session.user.id, '1w');
-    res.json(portfolioHistory({ ...ctx, fromDate: addDays(ctx.today, -RANGE_DAYS[range]) }));
+    const fromDate = addDays(istDate(), -RANGE_DAYS[range]);
+    const holdings = await store.listHoldings(userId);
+    // Stocks sold inside the range were still held for part of it, so they belong on the chart up to their sale.
+    const soldLots = await store.listSoldLots(userId, fromDate);
+    const symbols = [...new Set([...holdings, ...soldLots].map((x) => x.symbol))];
+    // A couple of weeks before the range, so the first day can carry forward a close over holidays.
+    const seriesFrom = addDays(fromDate, -14);
+    let seriesBySymbol = await store.getSeriesMany(symbols, seriesFrom);
+
+    // Stocks sold before their closes were kept have no prices any more: fetch them again.
+    const held = new Set(holdings.map((h) => h.symbol));
+    const now = Date.now();
+    const missing = symbols
+      .filter((s) => !held.has(s) && !seriesBySymbol.get(s).length)
+      .filter((s) => now - (soldBackfillTried.get(s) ?? 0) > SOLD_BACKFILL_RETRY_MS)
+      .slice(0, SOLD_BACKFILL_PER_REQUEST);
+    if (missing.length) {
+      for (const s of missing) soldBackfillTried.set(s, now);
+      await Promise.allSettled(missing.map((s) => tracker.backfill(s)));
+      seriesBySymbol = await store.getSeriesMany(symbols, seriesFrom);
+    }
+    res.json(portfolioHistory({ holdings, soldLots, seriesBySymbol, fromDate }));
   });
 
   api.get('/stocks/:symbol/history', async (req, res) => {
@@ -382,19 +459,30 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
 
   api.post('/rules', async (req, res) => {
     const userId = req.session.user.id;
-    const { symbol, window, thresholdPct } = parse(ruleSchema, req.body);
+    const body = parse(ruleSchema, req.body);
+    const { symbol } = body;
     if ((await store.countRules(userId)) >= config.maxRulesPerUser) {
       throw new HttpError(400, `you can have up to ${config.maxRulesPerUser} alerts`);
     }
     if (symbol && !(await store.listHoldings(userId)).some((h) => h.symbol === symbol)) {
       throw new HttpError(404, 'stock not in portfolio');
     }
-    res.status(201).json(await store.addRule(userId, { symbol: symbol ?? null, window, thresholdPct }));
+    const fields =
+      body.kind === 'price'
+        ? { kind: 'price', symbol, direction: body.direction, targetPrice: body.targetPrice }
+        : { kind: 'drop', symbol: symbol ?? null, window: body.window, thresholdPct: body.thresholdPct };
+    res.status(201).json(await store.addRule(userId, fields));
   });
 
   api.put('/rules/:id', async (req, res) => {
+    const userId = req.session.user.id;
+    const id = parseId(req.params.id);
     const body = parse(ruleUpdateSchema, req.body);
-    const updated = await store.updateRule(req.session.user.id, parseId(req.params.id), body);
+    const existing = await store.getRule(userId, id);
+    if (!existing) throw new HttpError(404, 'not found');
+    // Only the level that belongs to this kind of rule can change; the other is ignored.
+    const level = existing.kind === 'price' ? { targetPrice: body.targetPrice } : { thresholdPct: body.thresholdPct };
+    const updated = await store.updateRule(userId, id, { ...level, enabled: body.enabled });
     if (!updated) throw new HttpError(404, 'not found');
     res.json(updated);
   });

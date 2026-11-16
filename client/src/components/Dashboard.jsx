@@ -16,7 +16,7 @@ import {
   YAxis,
 } from 'recharts';
 import { api } from '../api.js';
-import { money, compactMoney, price, pct, signedMoney, tone, shortDate, PERIOD_LABEL, PERIOD_VS } from '../format.js';
+import { money, compactMoney, price, pct, signedMoney, tone, shortDate, timeAgo, PERIOD_LABEL, PERIOD_VS } from '../format.js';
 
 const GREEN = '#15803d';
 const RED = '#b91c1c';
@@ -45,23 +45,28 @@ function PortfolioChart() {
         <h2>Portfolio value over time</h2>
         <div className="seg">
           {['1m', '3m', '6m', '1y'].map((r) => (
-            <button key={r} className={range === r ? 'on' : ''} onClick={() => setRange(r)}>{r.toUpperCase()}</button>
+            <button key={r} className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>{r.toUpperCase()}</button>
           ))}
         </div>
       </div>
       {data.length < 2 ? (
         <p className="muted">Not enough history yet.</p>
       ) : (
+        <div role="img" aria-label={`Portfolio value from ${money(data[0].value)} on ${shortDate(data[0].date)} to ${money(data[data.length - 1].value)} on ${shortDate(data[data.length - 1].date)}. You invested ${money(data[data.length - 1].invested)}.`}>
         <ResponsiveContainer width="100%" height={260}>
           <ComposedChart data={data} margin={{ left: 8, right: 8, top: 8 }}>
             <CartesianGrid stroke="#eef0f3" vertical={false} />
             <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={40} fontSize={12} />
             <YAxis domain={['auto', 'auto']} tickFormatter={compactMoney} width={64} fontSize={12} />
-            <Tooltip formatter={(v, n) => [money(v), n === 'value' ? 'Current value' : 'Invested']} labelFormatter={shortDate} />
+            <Tooltip formatter={(v, n) => [money(v), n === 'value' ? 'Value' : 'Invested']} labelFormatter={shortDate} />
             <Area type="monotone" dataKey="value" stroke={BLUE} fill="#dbeafe" strokeWidth={2} />
             <Line type="stepAfter" dataKey="invested" stroke="#6b7280" strokeDasharray="4 4" dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
+        </div>
+      )}
+      {data.length >= 2 && (
+        <p className="muted small">What you held on each day: purchases count from the day you bought them, and shares you sold count until the day you sold them.</p>
       )}
     </section>
   );
@@ -77,6 +82,7 @@ function ContributionChart({ rows, period }) {
     <section className="card">
       <h2>What moved your portfolio — {PERIOD_LABEL[period].toLowerCase()}</h2>
       <p className="muted">Rupee change in each stock's value vs {PERIOD_VS[period]}. Red bars are pulling you down.</p>
+      <div role="img" aria-label={`Change in value by stock, ${PERIOD_LABEL[period].toLowerCase()}: ${[...data].reverse().map((d) => `${d.symbol} ${signedMoney(d.change)}`).join(', ')}.`}>
       <ResponsiveContainer width="100%" height={Math.max(160, data.length * 34)}>
         <BarChart data={data} layout="vertical" margin={{ left: 16, right: 24 }}>
           <CartesianGrid stroke="#eef0f3" horizontal={false} />
@@ -91,6 +97,7 @@ function ContributionChart({ rows, period }) {
           </Bar>
         </BarChart>
       </ResponsiveContainer>
+      </div>
     </section>
   );
 }
@@ -110,7 +117,7 @@ function StockDetail({ row, period, onClose }) {
         <h2>{row.symbol} <span className="muted">{row.name}</span></h2>
         <div className="seg">
           {['1d', '1m', '3m', '6m', '1y'].map((r) => (
-            <button key={r} className={range === r ? 'on' : ''} onClick={() => setRange(r)}>
+            <button key={r} className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>
               {r === '1d' ? 'Hourly' : r.toUpperCase()}
             </button>
           ))}
@@ -123,6 +130,7 @@ function StockDetail({ row, period, onClose }) {
       {points.length < 2 ? (
         <p className="muted">{intraday ? 'Hourly points build up while the server runs during market hours.' : 'Not enough history yet.'}</p>
       ) : (
+        <div role="img" aria-label={`${row.symbol} price from ${price(points[0].price)} to ${price(points[points.length - 1].price)}. Your average cost is ${price(row.avgCost)}.`}>
         <ResponsiveContainer width="100%" height={240}>
           <LineChart data={points} margin={{ left: 8, right: 8, top: 8 }}>
             <CartesianGrid stroke="#eef0f3" vertical={false} />
@@ -138,6 +146,7 @@ function StockDetail({ row, period, onClose }) {
             <Line type="monotone" dataKey="price" stroke={BLUE} strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
+        </div>
       )}
     </section>
   );
@@ -216,8 +225,17 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
   const { totals } = report;
   const selectedRow = report.holdings.find((h) => h.symbol === selected);
 
+  const pendingSplits = report.pendingSplits ?? [];
+
   return (
     <>
+      {pendingSplits.length > 0 && (
+        <div className="warn box split-notice" role="status">
+          {pendingSplits.map((p) => p.symbol).join(', ')} had a split or bonus issue. Until you confirm{' '}
+          {pendingSplits.length === 1 ? 'it, its' : 'them, their'} value here is off.{' '}
+          <button onClick={goToStocks}>Review on Holdings</button>
+        </div>
+      )}
       <div className="stats">
         <Stat label="Stocks held" value={report.holdings.length} />
         <Stat label="Invested" value={money(totals.invested)} />
@@ -244,7 +262,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
         <span>Report period</span>
         <div className="seg">
           {Object.entries(PERIOD_LABEL).map(([k, v]) => (
-            <button key={k} className={period === k ? 'on' : ''} onClick={() => setPeriod(k)}>{v}</button>
+            <button key={k} className={period === k ? 'on' : ''} aria-pressed={period === k} onClick={() => setPeriod(k)}>{v}</button>
           ))}
         </div>
       </div>
@@ -280,7 +298,11 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
               {sorted.map((r) => (
                 <tr key={r.symbol} className={selected === r.symbol ? 'sel' : ''} onClick={() => setSelected(r.symbol)}>
                   <td><strong>{r.symbol}</strong><div className="muted small">{r.name}</div></td>
-                  <td className="r">{price(r.price)}</td>
+                  <td className="r">
+                    {price(r.price)}
+                    {r.stale && <div><span className="stale" title="This price is older than expected. The next refresh will update it.">Stale · {timeAgo(r.priceAsOf)}</span></div>}
+                    {r.splitPending && <div><span className="stale" title="Confirm the split or bonus issue on the Holdings tab">Split to confirm</span></div>}
+                  </td>
                   <td className="r">{price(r.avgCost)}</td>
                   <td className="r">{money(r.value)}</td>
                   <td className={`r ${tone(r.pnl)}`}>{signedMoney(r.pnl)}</td>
