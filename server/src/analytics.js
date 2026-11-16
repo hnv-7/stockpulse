@@ -191,37 +191,62 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
 }
 
 /**
- * Portfolio value per date, forward-filling each stock's last known close.
- * Returns [{date, value, invested}] for dates >= fromDate.
+ * Value of what was actually held on each date, and what that cost. Returns [{date, value, invested}] for
+ * dates >= fromDate.
+ *
+ * Each purchase counts from its purchase date. Shares that were later sold count up to (not on) their sale date,
+ * so a stock bought last month doesn't show up earlier, and a sold stock still shows for the time it was held.
+ * Undated purchases count as held for the whole range. Closes are forward-filled over days a stock didn't trade.
+ *
+ * holdings: [{symbol, quantity, invested, purchase_date?, lots?: [{quantity, invested, purchase_date}]}]
+ * soldLots: [{symbol, quantity, invested, purchase_date, sale_date}] - the purchases each sale used up
+ * seriesBySymbol: Map<symbol, [{date, close}]> ascending
  */
-export function portfolioHistory({ holdings, seriesBySymbol, fromDate }) {
-  const dates = new Set();
+export function portfolioHistory({ holdings, soldLots = [], seriesBySymbol, fromDate }) {
+  const positions = [];
   for (const h of holdings) {
-    for (const p of seriesBySymbol.get(h.symbol) ?? []) if (p.date >= fromDate) dates.add(p.date);
+    const lots = h.lots?.length ? h.lots : [{ quantity: h.quantity, invested: h.invested, purchase_date: h.purchase_date }];
+    for (const l of lots) {
+      positions.push({ symbol: h.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: null });
+    }
   }
-  const sorted = [...dates].sort();
-  const invested = holdings.reduce((s, h) => s + h.invested, 0);
-  const cursor = new Map(holdings.map((h) => [h.symbol, 0]));
+  for (const l of soldLots) {
+    if (l.sale_date <= fromDate) continue; // sold before the range starts: never held inside it
+    positions.push({ symbol: l.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: l.sale_date });
+  }
+  // A stock with no stored prices at all can't be valued on any day. Leave it out rather than blank the whole chart.
+  const priced = positions.filter((p) => seriesBySymbol.get(p.symbol)?.length);
+
+  const symbols = [...new Set(priced.map((p) => p.symbol))];
+  const dates = new Set();
+  for (const s of symbols) for (const p of seriesBySymbol.get(s)) if (p.date >= fromDate) dates.add(p.date);
+  const cursor = new Map(symbols.map((s) => [s, 0]));
   const lastClose = new Map();
   const out = [];
 
-  for (const date of sorted) {
-    let value = 0;
-    let complete = true;
-    for (const h of holdings) {
-      const series = seriesBySymbol.get(h.symbol) ?? [];
-      let i = cursor.get(h.symbol);
-      while (i < series.length && series[i].date <= date) {
-        lastClose.set(h.symbol, series[i].close);
-        i++;
-      }
-      cursor.set(h.symbol, i);
-      const c = lastClose.get(h.symbol);
-      if (c == null) complete = false;
-      else value += c * h.quantity;
+  for (const date of [...dates].sort()) {
+    for (const s of symbols) {
+      const series = seriesBySymbol.get(s);
+      let i = cursor.get(s);
+      while (i < series.length && series[i].date <= date) lastClose.set(s, series[i++].close);
+      cursor.set(s, i);
     }
-    // Skip leading days before every stock has a price, otherwise the curve starts artificially low.
-    if (complete) out.push({ date, value, invested });
+    let value = 0;
+    let invested = 0;
+    let held = 0;
+    let complete = true;
+    for (const p of priced) {
+      if ((p.from && date < p.from) || (p.until && date >= p.until)) continue;
+      held++;
+      invested += p.invested;
+      const c = lastClose.get(p.symbol);
+      if (c == null) complete = false;
+      else value += c * p.quantity;
+    }
+    // Nothing to draw before the first purchase in the range. A day where something held has no price yet (before
+    // that stock's first close) is skipped too, otherwise the curve dips artificially.
+    if (!complete || (!held && !out.length)) continue;
+    out.push({ date, value, invested });
   }
   return out;
 }

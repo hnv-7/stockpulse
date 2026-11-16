@@ -101,6 +101,61 @@ CREATE TABLE IF NOT EXISTS alert_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_rules_user ON alert_rules (user_id);
 
+-- Price-target rules: "tell me when SYMBOL goes above/below a price". Drop rules keep win + threshold_pct.
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'drop';
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS direction TEXT;
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS target_price DOUBLE PRECISION;
+ALTER TABLE alert_rules ALTER COLUMN win DROP NOT NULL;
+ALTER TABLE alert_rules ALTER COLUMN threshold_pct DROP NOT NULL;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'alert_rules_kind_shape') THEN
+    ALTER TABLE alert_rules ADD CONSTRAINT alert_rules_kind_shape CHECK (
+      (kind = 'drop' AND win IS NOT NULL AND threshold_pct IS NOT NULL AND target_price IS NULL AND direction IS NULL)
+      OR
+      (kind = 'price' AND symbol IS NOT NULL AND target_price > 0 AND direction IN ('above','below')
+        AND win IS NULL AND threshold_pct IS NULL)
+    );
+  END IF;
+END $$;
+
+-- When a price rule was made, so a split only rescales targets set before it. Older rules have NULL (= before).
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS created_at BIGINT;
+
+-- Splits and bonus issues (shared market data) as Yahoo reports them: every "denominator" shares became "numerator".
+-- Yahoo stores bonus issues as splits and sometimes gets combined actions wrong, so price_ratio keeps what the price
+-- itself moved by (last price before the ex-date / Yahoo's adjusted close for that day) when it is known.
+CREATE TABLE IF NOT EXISTS stock_splits (
+  symbol      TEXT NOT NULL,
+  ex_date     DATE NOT NULL,
+  numerator   DOUBLE PRECISION NOT NULL CHECK (numerator > 0),
+  denominator DOUBLE PRECISION NOT NULL CHECK (denominator > 0),
+  price_ratio DOUBLE PRECISION,
+  found_at    BIGINT NOT NULL,
+  PRIMARY KEY (symbol, ex_date)
+);
+-- The IST date each symbol was last checked for splits.
+CREATE TABLE IF NOT EXISTS split_checks (
+  symbol     TEXT PRIMARY KEY,
+  checked_on DATE NOT NULL
+);
+-- A split that may change a user's shares. Nothing of theirs changes until they confirm it (with a ratio they can
+-- correct) or dismiss it.
+CREATE TABLE IF NOT EXISTS split_reviews (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  symbol      TEXT NOT NULL,
+  ex_date     DATE NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'dismissed')),
+  numerator   DOUBLE PRECISION,
+  denominator DOUBLE PRECISION,
+  created_at  BIGINT NOT NULL,
+  resolved_at BIGINT,
+  UNIQUE (user_id, symbol, ex_date)
+);
+CREATE INDEX IF NOT EXISTS idx_split_reviews_user ON split_reviews (user_id, status);
+-- How many of today's shares each share in a sale has become through splits confirmed since (1 = none).
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS split_factor DOUBLE PRECISION NOT NULL DEFAULT 1;
+
 CREATE TABLE IF NOT EXISTS notifications (
   id      BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

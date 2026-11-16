@@ -29,6 +29,7 @@ export async function setup({ prices = { 'AAA.NS': 100, 'BBB.NS': 50 }, env = {}
       getQuotes: async (symbols) =>
         new Map(symbols.filter((s) => prices[s]).map((s) => [s, { symbol: s, price: prices[s], name: s }])),
       getDailyHistory: async () => history,
+      getSplits: async () => ({ points: history, splits: [] }),
       getQuote: async (s) => (prices[s] ? { symbol: s, price: prices[s], name: `${s} Ltd` } : null),
       searchSymbols: async () => [{ symbol: 'AAA.NS', name: 'Triple A Ltd', exchange: 'NSE' }],
       ...extraDeps,

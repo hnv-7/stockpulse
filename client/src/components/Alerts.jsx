@@ -10,12 +10,15 @@ const WINDOWS = {
 };
 
 function RuleRow({ rule, onChanged }) {
-  const [value, setValue] = useState(String(rule.threshold_pct));
+  const isPrice = rule.kind === 'price';
+  const current = isPrice ? rule.target_price : rule.threshold_pct;
+  const [value, setValue] = useState(String(current));
   const [error, setError] = useState('');
 
   const update = async (patch) => {
     try {
-      await api.updateRule(rule.id, { thresholdPct: Number(value), enabled: rule.enabled, ...patch });
+      const level = isPrice ? { targetPrice: Number(value) } : { thresholdPct: Number(value) };
+      await api.updateRule(rule.id, { ...level, enabled: rule.enabled, ...patch });
       setError('');
       onChanged();
     } catch (e) {
@@ -23,18 +26,30 @@ function RuleRow({ rule, onChanged }) {
     }
   };
 
+  const label = rule.symbol ?? 'Any stock';
   return (
     <li className="rule">
       <div>
-        <strong>{rule.symbol ?? 'Any stock'}</strong> falls ≥
-        <input className="narrow" type="number" min="0.1" max="99" step="any" value={value} onChange={(e) => setValue(e.target.value)} aria-label="Threshold percent" />%
-        <span className="muted"> {WINDOWS[rule.window]}</span>
+        <strong>{label}</strong>
+        {isPrice ? (
+          <>
+            {' '}goes {rule.direction === 'above' ? 'above' : 'below'} ₹
+            <input className="narrow" type="number" min="0.01" step="any" value={value} onChange={(e) => setValue(e.target.value)} aria-label={`Target price for ${label}`} />
+            {!rule.enabled && <span className="muted small"> · reached or paused</span>}
+          </>
+        ) : (
+          <>
+            {' '}falls ≥
+            <input className="narrow" type="number" min="0.1" max="99" step="any" value={value} onChange={(e) => setValue(e.target.value)} aria-label={`Threshold percent for ${label}`} />%
+            <span className="muted"> {WINDOWS[rule.window]}</span>
+          </>
+        )}
         {error && <span className="neg small"> {error}</span>}
       </div>
       <div className="nowrap">
-        {String(rule.threshold_pct) !== value && <button onClick={() => update({})}>Save</button>}{' '}
+        {String(current) !== value && <button onClick={() => update({})}>Save</button>}{' '}
         <button onClick={() => update({ enabled: !rule.enabled })}>{rule.enabled ? 'Pause' : 'Resume'}</button>{' '}
-        <button className="danger" onClick={async () => { await api.removeRule(rule.id); onChanged(); }}>Delete</button>
+        <button className="danger" aria-label={`Delete alert for ${label}`} onClick={async () => { await api.removeRule(rule.id); onChanged(); }}>Delete</button>
       </div>
     </li>
   );
@@ -44,7 +59,8 @@ export default function Alerts({ onRead }) {
   const [rules, setRules] = useState([]);
   const [holdings, setHoldings] = useState([]);
   const [notes, setNotes] = useState({ unread: 0, items: [] });
-  const [form, setForm] = useState({ symbol: '', window: '1d', thresholdPct: '5' });
+  const [kind, setKind] = useState('drop'); // 'drop' = falls by a percentage, 'price' = reaches a price
+  const [form, setForm] = useState({ symbol: '', window: '1d', thresholdPct: '5', direction: 'above', targetPrice: '' });
   const [error, setError] = useState('');
 
   const load = async () => {
@@ -60,7 +76,11 @@ export default function Alerts({ onRead }) {
     e.preventDefault();
     setError('');
     try {
-      await api.addRule({ symbol: form.symbol || null, window: form.window, thresholdPct: Number(form.thresholdPct) });
+      if (kind === 'price') {
+        await api.addRule({ kind: 'price', symbol: form.symbol, direction: form.direction, targetPrice: Number(form.targetPrice) });
+      } else {
+        await api.addRule({ kind: 'drop', symbol: form.symbol || null, window: form.window, thresholdPct: Number(form.thresholdPct) });
+      }
       await load();
     } catch (err) {
       setError(err.message);
@@ -70,26 +90,52 @@ export default function Alerts({ onRead }) {
   return (
     <>
       <form className="card form" onSubmit={add}>
-        <h2>Drop alerts</h2>
-        <p className="muted">Get notified when a stock falls by the percentage you choose. Checked every hour during market hours; each alert repeats at most once a day.</p>
+        <h2>New alert</h2>
+        <div className="seg" role="group" aria-label="Alert type">
+          <button type="button" aria-pressed={kind === 'drop'} className={kind === 'drop' ? 'on' : ''} onClick={() => setKind('drop')}>Falls by a percentage</button>
+          <button type="button" aria-pressed={kind === 'price'} className={kind === 'price' ? 'on' : ''} onClick={() => setKind('price')}>Reaches a price</button>
+        </div>
+        {kind === 'drop' ? (
+          <p className="muted">Get notified when a stock falls by the percentage you choose. Checked every hour during market hours; each alert repeats at most once a day.</p>
+        ) : (
+          <p className="muted">Get notified once when a stock goes above (a target) or below (a stop-loss) the price you set. After it fires the alert pauses itself; resume it to watch again.</p>
+        )}
         <div className="row">
           <label>
             Stock
-            <select value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })}>
-              <option value="">Any stock in my portfolio</option>
+            <select value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} required={kind === 'price'}>
+              <option value="">{kind === 'price' ? 'Choose a stock' : 'Any stock in my portfolio'}</option>
               {holdings.map((h) => <option key={h.symbol} value={h.symbol}>{h.symbol}</option>)}
             </select>
           </label>
-          <label>
-            Falls by (%)
-            <input type="number" min="0.1" max="99" step="any" value={form.thresholdPct} onChange={(e) => setForm({ ...form, thresholdPct: e.target.value })} required />
-          </label>
-          <label>
-            Measured
-            <select value={form.window} onChange={(e) => setForm({ ...form, window: e.target.value })}>
-              {Object.entries(WINDOWS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </label>
+          {kind === 'drop' ? (
+            <>
+              <label>
+                Falls by (%)
+                <input type="number" min="0.1" max="99" step="any" value={form.thresholdPct} onChange={(e) => setForm({ ...form, thresholdPct: e.target.value })} required />
+              </label>
+              <label>
+                Measured
+                <select value={form.window} onChange={(e) => setForm({ ...form, window: e.target.value })}>
+                  {Object.entries(WINDOWS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                When the price goes
+                <select value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })}>
+                  <option value="above">Above</option>
+                  <option value="below">Below</option>
+                </select>
+              </label>
+              <label>
+                Price (₹)
+                <input type="number" min="0.01" step="any" value={form.targetPrice} onChange={(e) => setForm({ ...form, targetPrice: e.target.value })} required />
+              </label>
+            </>
+          )}
         </div>
         {error && <div className="error" role="alert">{error}</div>}
         <button className="primary">Add alert</button>

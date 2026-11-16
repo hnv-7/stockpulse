@@ -3,7 +3,7 @@
   --card: #fff;
   --line: #e5e7eb;
   --text: #1f2328;
-  --muted: #6b7280;
+  --muted: #4b5563;
   --pos: #15803d;
   --neg: #b91c1c;
   --accent: #2563eb;
@@ -17,7 +17,11 @@ body { margin: 0; background: var(--bg); font-size: 14px; line-height: 1.5; }
 .brand { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 8px; }
 nav { display: flex; gap: 4px; flex: 1; }
 .tab { border: 0; background: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; font: inherit; color: var(--muted); }
-.tab.active { background: #e8effd; color: var(--accent); font-weight: 600; }
+.tab.active { background: #e8effd; color: #1d4ed8; font-weight: 600; }
+.skip { position: absolute; left: -9999px; top: 8px; z-index: 10; background: #fff; border: 2px solid var(--accent); border-radius: 6px; padding: 8px 12px; color: var(--text); }
+.skip:focus { left: 8px; }
+main:focus { outline: none; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .badge { background: var(--neg); color: #fff; border-radius: 10px; padding: 0 6px; margin-left: 6px; font-size: 11px; }
 .asof { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
 main { display: flex; flex-direction: column; gap: 16px; }
@@ -39,6 +43,7 @@ main { display: flex; flex-direction: column; gap: 16px; }
 .neg { color: var(--neg); }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
+.stale { display: inline-block; margin-top: 2px; padding: 0 6px; border: 1px solid #b45309; border-radius: 10px; color: #92400e; background: #fffbeb; font-size: 11px; white-space: nowrap; }
 .nowrap { white-space: nowrap; }
 .seg { display: inline-flex; gap: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .seg button { border: 0; border-right: 1px solid var(--line); border-radius: 0; background: #fff; }
@@ -46,6 +51,8 @@ main { display: flex; flex-direction: column; gap: 16px; }
 .seg button.on { background: var(--accent); color: #fff; }
 button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
 button:hover:not(:disabled) { background: #f3f4f6; }
+.seg button.on, .seg button.on:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.form .seg { align-self: flex-start; }
 button:disabled { opacity: 0.6; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; align-self: flex-start; }
 button.primary:hover:not(:disabled) { background: #1d4ed8; }
@@ -105,3 +112,13 @@ tr.sell-row > td { padding: 0; }
 .sell-total { display: flex; flex-direction: column; align-items: flex-end; }
 .sell-total strong { font-size: 18px; }
 
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Splits and bonus issues waiting for confirmation */
+.split-review { border-color: #fde68a; }
+.split-review h2 { margin-top: 0; }
+.split-ratio { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.split-ratio input { width: 6em; }
+.split-effects { margin: 8px 0 12px; padding-left: 18px; }
+.split-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.split-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
-import { money, price, signedMoney, pct, tone } from '../format.js';
+import { money, price, signedMoney, pct, tone, timeAgo } from '../format.js';
 
 // Latest allowed purchase date (today in India, matching the server's rule).
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -363,7 +363,10 @@ function Row({ h, onChanged, onSell, selling }) {
   return (
     <>
     <tr>
-      <td><strong>{h.symbol}</strong><div className="muted small">{h.name}</div></td>
+      <td>
+        <strong>{h.symbol}</strong><div className="muted small">{h.name}</div>
+        {h.splitPending && <span className="stale" title="A split or bonus issue is waiting for you to confirm it, above">Split to confirm</span>}
+      </td>
       {editing ? (
         <>
           <td className="r"><input className="narrow" type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} aria-label="Quantity" /></td>
@@ -384,15 +387,18 @@ function Row({ h, onChanged, onSell, selling }) {
           </td>
           <td className="r">{h.value == null ? '—' : money(h.value)}</td>
           <td className={`r ${tone(h.pnl)}`}>{h.pnl == null ? '—' : <>{signedMoney(h.pnl)} <span className="small">({pct(h.pnlPct)})</span></>}</td>
-          <td className="r">{price(h.price)}</td>
+          <td className="r">
+            {price(h.price)}
+            {h.stale && <div><span className="stale" title="This price is older than expected. The next refresh will update it.">Stale · {timeAgo(h.priceAsOf)}</span></div>}
+          </td>
         </>
       )}
       <td className="r nowrap">
-        <button onClick={onSell} aria-expanded={selling}>Sell</button>{' '}
+        <button onClick={onSell} aria-expanded={selling} aria-label={`Sell ${h.symbol}`}>Sell</button>{' '}
         {multi
           ? <button onClick={() => setOpen(!open)} aria-expanded={open}>{open ? 'Hide' : 'Purchases'} ({h.lots.length})</button>
-          : !editing && <button onClick={() => setEditing(true)}>Edit</button>}{' '}
-        <button className="danger" onClick={remove}>Remove</button>
+          : !editing && <button aria-label={`Edit ${h.symbol}`} onClick={() => setEditing(true)}>Edit</button>}{' '}
+        <button className="danger" aria-label={`Remove ${h.symbol}`} onClick={remove}>Remove</button>
       </td>
     </tr>
     {multi && open && h.lots.map((l) => <LotRow key={`${l.id}-${l.quantity}-${l.invested}-${l.purchase_date}`} h={h} lot={l} onChanged={onChanged} />)}
@@ -497,14 +503,21 @@ function SalesHistory({ sales, onChanged, onMessage }) {
                 <tr>
                   <td className="nowrap">{niceDate(s.saleDate)}</td>
                   <td><strong>{s.symbol}</strong><div className="muted small">{s.name}</div></td>
-                  <td className="r">{s.quantity}</td>
+                  <td className="r">
+                    {s.quantity}
+                    {s.splitFactor !== 1 && (
+                      <div className="muted small" title={`Restated after a later split or bonus issue: you sold ${shares(s.quantity / s.splitFactor)} at ${price(s.salePrice * s.splitFactor)}`}>
+                        in today's shares
+                      </div>
+                    )}
+                  </td>
                   <td className="r">{price(s.salePrice)}</td>
                   <td className="r">{money(s.proceeds - s.charges)}{s.charges > 0 && <div className="muted small">after {money(s.charges)} charges</div>}</td>
                   <td className="r">{money(s.costBasis)}</td>
                   <td className={`r ${tone(s.realised)}`}>{signedMoney(s.realised)} <span className="small">({pct(s.realisedPct)})</span></td>
                   <td className="nowrap">
-                    <button onClick={() => setEditingId(editingId === s.id ? null : s.id)} aria-expanded={editingId === s.id}>Edit</button>{' '}
-                    <button className="danger" onClick={() => remove(s)}>Remove</button>
+                    <button aria-label={`Edit sale of ${s.symbol} on ${s.saleDate}`} onClick={() => setEditingId(editingId === s.id ? null : s.id)} aria-expanded={editingId === s.id}>Edit</button>{' '}
+                    <button className="danger" aria-label={`Remove sale of ${s.symbol} on ${s.saleDate}`} onClick={() => remove(s)}>Remove</button>
                   </td>
                 </tr>
                 {editingId === s.id && (
@@ -649,6 +662,82 @@ function ImportReview({ preview, onDone, onCancel }) {
   );
 }
 
+const shares = (q) => Number(q.toFixed(4)).toLocaleString('en-IN', { maximumFractionDigits: 4 });
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * A split or bonus issue found for one of your stocks. Nothing changes until you confirm it, with the ratio
+ * pre-filled from Yahoo (or from the price move, when the two disagree) and editable.
+ */
+function SplitReview({ r, onChanged, onMessage }) {
+  const [before, setBefore] = useState(String(r.suggested.denominator));
+  const [after, setAfter] = useState(String(r.suggested.numerator));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const den = Number(before);
+  const num = Number(after);
+  const valid = den > 0 && num > 0 && den <= 1000 && num <= 1000 && den !== num;
+  const ratio = valid ? num / den : null;
+  const reported = `every ${r.reported.denominator} ${r.reported.denominator === 1 ? 'share' : 'shares'} became ${r.reported.numerator}`;
+
+  const act = async (fn, text) => {
+    setBusy(true);
+    setError('');
+    try {
+      await fn();
+      onMessage({ ok: true, text });
+      await onChanged();
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+  const apply = () =>
+    act(() => api.applySplit(r.id, { numerator: num, denominator: den }), `${r.symbol} updated for the split or bonus issue.`);
+  const dismiss = () => act(() => api.dismissSplit(r.id), `${r.symbol}: left as it was.`);
+
+  const { lots } = r;
+  return (
+    <section className="card split-review" aria-labelledby={`split-${r.id}`}>
+      <h2 id={`split-${r.id}`}>Split or bonus issue: {r.symbol}</h2>
+      <p>
+        {r.name} had a split or bonus issue on <strong>{niceDate(r.exDate)}</strong>. Your figures for it are still in the old
+        shares, so its value looks lower than it is. Check the ratio with your broker and confirm.
+      </p>
+      {r.suggested.mismatch && r.priceRatio != null && (
+        <div className="warn box" role="note">
+          Yahoo reports that {reported}, but the price moved by about {r.priceRatio.toFixed(1)}×. The ratio below follows the price
+          move. Check it against your broker before you confirm.
+        </div>
+      )}
+      <div className="split-ratio">
+        Every
+        <input type="number" min="1" step="any" value={before} onChange={(e) => setBefore(e.target.value)} aria-label="Shares before" />
+        {den === 1 ? 'share' : 'shares'} became
+        <input type="number" min="1" step="any" value={after} onChange={(e) => setAfter(e.target.value)} aria-label="Shares after" />
+      </div>
+      <ul className="split-effects">
+        {lots.count > 0 && (
+          <li>
+            Shares you bought before then: <strong>{shares(lots.quantity)} → {ratio ? shares(lots.quantity * ratio) : '…'}</strong>
+            {ratio && <>, average cost {price(lots.invested / lots.quantity)} → {price(lots.invested / (lots.quantity * ratio))}</>}.
+            The amount you invested ({money(lots.invested)}) stays the same.
+          </li>
+        )}
+        {r.sales > 0 && (
+          <li>{plural(r.sales, 'earlier sale is', 'earlier sales are')} restated in the new shares. What you received and the profit stay the same.</li>
+        )}
+        {r.priceTargets > 0 && <li>{plural(r.priceTargets, 'price target is', 'price targets are')} divided by the same ratio.</li>}
+      </ul>
+      {error && <div className="error" role="alert">{error}</div>}
+      <div className="split-actions">
+        <button className="primary" disabled={!valid || busy} onClick={apply}>Update my shares</button>
+        <button disabled={busy} onClick={dismiss} title="Use this if your quantities already include it">Already done / not needed</button>
+      </div>
+    </section>
+  );
+}
+
 export default function Holdings({ onChange }) {
   const [holdings, setHoldings] = useState([]);
   const [rows, setRows] = useState(new Map());
@@ -656,12 +745,14 @@ export default function Holdings({ onChange }) {
   const [message, setMessage] = useState(null); // { ok, text }
   const [sellingId, setSellingId] = useState(null); // holding whose sell form is open
   const [sales, setSales] = useState(null);
+  const [splits, setSplits] = useState([]); // splits / bonus issues waiting for the user to confirm
 
   const load = async () => {
-    const [h, r, s] = await Promise.all([api.holdings(), api.report('1w'), api.sales()]);
+    const [h, r, s, sp] = await Promise.all([api.holdings(), api.report('1w'), api.sales(), api.splits()]);
     setHoldings(h);
     setRows(new Map(r.holdings.map((x) => [x.symbol, x])));
     setSales(s);
+    setSplits(sp);
   };
   useEffect(() => { load().catch(() => {}); }, []);
 
@@ -683,13 +774,14 @@ export default function Holdings({ onChange }) {
 
   // Merge live figures into each holding so every column is sortable.
   const merged = useMemo(
-    () => holdings.map((h) => ({ ...h, value: rows.get(h.symbol)?.value ?? null, pnl: rows.get(h.symbol)?.pnl ?? null, pnlPct: rows.get(h.symbol)?.pnlPct ?? null, price: rows.get(h.symbol)?.price ?? null })),
+    () => holdings.map((h) => ({ ...h, value: rows.get(h.symbol)?.value ?? null, pnl: rows.get(h.symbol)?.pnl ?? null, pnlPct: rows.get(h.symbol)?.pnlPct ?? null, price: rows.get(h.symbol)?.price ?? null, stale: rows.get(h.symbol)?.stale ?? false, priceAsOf: rows.get(h.symbol)?.priceAsOf ?? null, splitPending: rows.get(h.symbol)?.splitPending ?? false })),
     [holdings, rows],
   );
   const { sorted, sort, toggle } = useSort(merged, { key: 'symbol', dir: 'asc' });
 
   return (
     <>
+      {splits.map((r) => <SplitReview key={r.id} r={r} onChanged={changed} onMessage={setMessage} />)}
       <AddForm onAdded={changed} />
       <section className="card">
         <div className="card-head">
