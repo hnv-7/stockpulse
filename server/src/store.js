@@ -46,6 +46,17 @@ const lot = (r) => ({
 
 const round = (v, dp) => Math.round(v * 10 ** dp) / 10 ** dp;
 
+const WATCH_COLS = 'id, user_id, symbol, name, note, added_price, created_at';
+const watch = (r) =>
+  r && {
+    id: n(r.id),
+    symbol: r.symbol,
+    name: r.name,
+    note: r.note,
+    added_price: n(r.added_price),
+    created_at: n(r.created_at),
+  };
+
 const SALE_COLS = `id, symbol, name, quantity, sale_price, charges, cost_basis,
   to_char(sale_date, 'YYYY-MM-DD') AS sale_date, created_at, split_factor`;
 const sale = (r) => {
@@ -245,20 +256,36 @@ export function createStore(db) {
     return { status: 'ok', holdingId: n(holdingId), reopened };
   }
 
-  /** Delete a holding with its alerts, notifications and (if nobody else holds it) shared prices. `t` is a transaction. */
+  /**
+   * After a user stops holding or watching `symbol`: their alerts and notifications for it go once they neither hold
+   * nor watch it, and shared prices go once nobody does. Daily closes are kept while any sale of it exists, so the
+   * value-over-time chart can still show a sold stock for the time it was held. `t` is a transaction.
+   */
+  async function released(t, userId, symbol) {
+    const mine = await t.query(
+      'SELECT 1 FROM holdings WHERE user_id = $1 AND symbol = $2 UNION ALL SELECT 1 FROM watchlist WHERE user_id = $1 AND symbol = $2 LIMIT 1',
+      [userId, symbol],
+    );
+    if (!mine.rows.length) {
+      await t.query('DELETE FROM alert_rules WHERE user_id = $1 AND symbol = $2', [userId, symbol]);
+      await t.query('DELETE FROM notifications WHERE user_id = $1 AND symbol = $2', [userId, symbol]);
+    }
+    const anyone = await t.query(
+      'SELECT 1 FROM holdings WHERE symbol = $1 UNION ALL SELECT 1 FROM watchlist WHERE symbol = $1 LIMIT 1',
+      [symbol],
+    );
+    if (!anyone.rows.length) {
+      const sold = await t.query('SELECT 1 FROM sales WHERE symbol = $1 LIMIT 1', [symbol]);
+      if (!sold.rows.length) await t.query('DELETE FROM daily_prices WHERE symbol = $1', [symbol]);
+      await t.query('DELETE FROM snapshots WHERE symbol = $1', [symbol]);
+    }
+  }
+
+  /** Delete a holding, then tidy up what nobody needs any more (see `released`). `t` is a transaction. */
   async function dropHolding(t, userId, id) {
     const h = (await t.query('DELETE FROM holdings WHERE user_id = $1 AND id = $2 RETURNING symbol', [userId, id])).rows[0];
     if (!h) return false;
-    await t.query('DELETE FROM alert_rules WHERE user_id = $1 AND symbol = $2', [userId, h.symbol]);
-    await t.query('DELETE FROM notifications WHERE user_id = $1 AND symbol = $2', [userId, h.symbol]);
-    // Shared market data is only dropped once nobody holds the symbol any more. Daily closes are kept while any sale
-    // of it exists, so the value-over-time chart can still show a sold stock for the time it was held.
-    const stillUsed = await t.query('SELECT 1 FROM holdings WHERE symbol = $1 LIMIT 1', [h.symbol]);
-    if (!stillUsed.rows.length) {
-      const sold = await t.query('SELECT 1 FROM sales WHERE symbol = $1 LIMIT 1', [h.symbol]);
-      if (!sold.rows.length) await t.query('DELETE FROM daily_prices WHERE symbol = $1', [h.symbol]);
-      await t.query('DELETE FROM snapshots WHERE symbol = $1', [h.symbol]);
-    }
+    await released(t, userId, h.symbol);
     return true;
   }
 
@@ -285,9 +312,12 @@ export function createStore(db) {
       await db.tx(async (t) => {
         await t.query('DELETE FROM users WHERE id = $1', [id]);
         await t.query(
-          'DELETE FROM daily_prices WHERE symbol NOT IN (SELECT symbol FROM holdings) AND symbol NOT IN (SELECT symbol FROM sales)',
+          `DELETE FROM daily_prices WHERE symbol NOT IN (SELECT symbol FROM holdings)
+             AND symbol NOT IN (SELECT symbol FROM watchlist) AND symbol NOT IN (SELECT symbol FROM sales)`,
         );
-        await t.query('DELETE FROM snapshots WHERE symbol NOT IN (SELECT symbol FROM holdings)');
+        await t.query(
+          'DELETE FROM snapshots WHERE symbol NOT IN (SELECT symbol FROM holdings) AND symbol NOT IN (SELECT symbol FROM watchlist)',
+        );
       });
     },
     async createSession({ tokenHash, userId, csrfToken, expiresAt }) {
@@ -488,9 +518,47 @@ export function createStore(db) {
       const costBasis = round(n(r.cost_basis), 2);
       return { count: n(r.c), proceeds, charges, costBasis, realised: round(proceeds - charges - costBasis, 2) };
     },
-    /** Distinct symbols held by anyone: the set the poller needs to fetch. */
+    /** Distinct symbols anyone holds or watches: the set the poller needs to fetch. */
     async allSymbols() {
-      return (await many('SELECT DISTINCT symbol FROM holdings ORDER BY symbol')).map((r) => r.symbol);
+      return (await many('SELECT symbol FROM holdings UNION SELECT symbol FROM watchlist ORDER BY symbol')).map((r) => r.symbol);
+    },
+
+    // ---------- watchlist ----------
+    async listWatchlist(userId) {
+      return (await many(`SELECT ${WATCH_COLS} FROM watchlist WHERE user_id = $1 ORDER BY created_at, id`, [userId])).map(watch);
+    },
+    async listAllWatchlist() {
+      return (await many(`SELECT ${WATCH_COLS} FROM watchlist`)).map((r) => ({ ...watch(r), userId: n(r.user_id) }));
+    },
+    async countWatchlist(userId) {
+      return n((await one('SELECT COUNT(*) AS c FROM watchlist WHERE user_id = $1', [userId])).c);
+    },
+    async isWatched(userId, symbol) {
+      return !!(await one('SELECT 1 FROM watchlist WHERE user_id = $1 AND symbol = $2', [userId, symbol]));
+    },
+    /** Returns the new entry, or null when the stock is already on the user's watchlist. */
+    async addWatch(userId, { symbol, name, note = '', addedPrice = null }) {
+      return watch(
+        await one(
+          `INSERT INTO watchlist (user_id, symbol, name, note, added_price, created_at) VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (user_id, symbol) DO NOTHING RETURNING ${WATCH_COLS}`,
+          [userId, symbol, name, note, addedPrice, Date.now()],
+        ),
+      );
+    },
+    async updateWatchNote(userId, id, note) {
+      return watch(
+        await one(`UPDATE watchlist SET note = $3 WHERE user_id = $1 AND id = $2 RETURNING ${WATCH_COLS}`, [userId, id, note]),
+      );
+    },
+    /** Stop watching; the stock's alerts go too unless the user holds it. */
+    async removeWatch(userId, id) {
+      return db.tx(async (t) => {
+        const w = (await t.query('DELETE FROM watchlist WHERE user_id = $1 AND id = $2 RETURNING symbol', [userId, id])).rows[0];
+        if (!w) return false;
+        await released(t, userId, w.symbol);
+        return true;
+      });
     },
     async listAllHoldings() {
       return (await many(`SELECT ${HOLDING_COLS} FROM holdings`)).map((r) => ({ ...holding(r), userId: n(r.user_id) }));
@@ -643,8 +711,8 @@ export function createStore(db) {
       await db.query('DELETE FROM snapshots WHERE symbol = $1 AND ts < $2', [symbol, beforeTs]);
     },
     /**
-     * Open a review for every user whose purchases or sales of `symbol` were entered before the split took effect
-     * (anything entered later was presumably entered in the new shares). Returns the new ones as [{id, userId}].
+     * Open a review for every user whose purchases, sales or watchlist entry for `symbol` were entered before the split
+     * took effect (anything entered later was presumably entered in the new shares). Returns the new ones as [{id, userId}].
      */
     async createSplitReviews(symbol, exDate, exStartTs, now) {
       const rows = await many(
@@ -654,6 +722,8 @@ export function createStore(db) {
             WHERE h.symbol = $1 AND l.created_at < $3
            UNION
            SELECT user_id FROM sales WHERE symbol = $1 AND created_at < $3
+           UNION
+           SELECT user_id FROM watchlist WHERE symbol = $1 AND created_at < $3
          ) affected
          ON CONFLICT (user_id, symbol, ex_date) DO NOTHING
          RETURNING id, user_id`,
@@ -708,16 +778,21 @@ export function createStore(db) {
              AND (created_at IS NULL OR created_at < $3)`,
           [userId, r.symbol, exStart],
         );
+        const watched = await one(
+          'SELECT name FROM watchlist WHERE user_id = $1 AND symbol = $2 AND created_at < $3',
+          [userId, r.symbol, exStart],
+        );
         out.push({
           id: n(r.id),
           symbol: r.symbol,
-          name: lots.name ?? sales.name ?? r.symbol,
+          name: lots.name ?? sales.name ?? watched?.name ?? r.symbol,
           exDate: r.ex_date,
           reported: { numerator: n(r.numerator), denominator: n(r.denominator) },
           priceRatio: n(r.price_ratio),
           lots: { count: n(lots.c), quantity: round(n(lots.q), 4), invested: round(n(lots.i), 2) },
           sales: n(sales.c),
           priceTargets: n(targets.c),
+          watching: !!watched,
         });
       }
       return out;
@@ -769,12 +844,18 @@ export function createStore(db) {
             WHERE user_id = $1 AND symbol = $2 AND kind = 'price' AND (created_at IS NULL OR created_at < $3)`,
           [userId, r.symbol, exStart, ratio],
         );
+        const watching = await t.query(
+          'UPDATE watchlist SET added_price = added_price / $4 WHERE user_id = $1 AND symbol = $2 AND created_at < $3',
+          [userId, r.symbol, exStart, ratio],
+        );
         await t.query(
           `UPDATE split_reviews SET status = 'applied', numerator = $3, denominator = $4, resolved_at = $5
             WHERE user_id = $1 AND id = $2`,
           [userId, id, numerator, denominator, now],
         );
-        return { status: 'ok', symbol: r.symbol, lots: lots.length, sales: sales.length, priceTargets: targets.rowCount };
+        return {
+          status: 'ok', symbol: r.symbol, lots: lots.length, sales: sales.length, priceTargets: targets.rowCount, watching: watching.rowCount > 0,
+        };
       });
     },
     async dismissSplitReview(userId, id, now = Date.now()) {

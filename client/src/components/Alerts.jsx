@@ -58,14 +58,17 @@ function RuleRow({ rule, onChanged }) {
 export default function Alerts({ onRead }) {
   const [rules, setRules] = useState([]);
   const [holdings, setHoldings] = useState([]);
+  const [watched, setWatched] = useState([]);
   const [notes, setNotes] = useState({ unread: 0, items: [] });
   const [kind, setKind] = useState('drop'); // 'drop' = falls by a percentage, 'price' = reaches a price
   const [form, setForm] = useState({ symbol: '', window: '1d', thresholdPct: '5', direction: 'above', targetPrice: '' });
   const [error, setError] = useState('');
 
   const load = async () => {
-    const [r, h, n] = await Promise.all([api.rules(), api.holdings(), api.notifications()]);
+    const [r, h, w, n] = await Promise.all([api.rules(), api.holdings(), api.watchlist(), api.notifications()]);
     setRules(r); setHoldings(h); setNotes(n);
+    const held = new Set(h.map((x) => x.symbol));
+    setWatched(w.filter((x) => !held.has(x.symbol)));
   };
   useEffect(() => {
     load().then(async () => { await api.markRead(); onRead(); }).catch(() => {});
@@ -105,7 +108,14 @@ export default function Alerts({ onRead }) {
             Stock
             <select value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} required={kind === 'price'}>
               <option value="">{kind === 'price' ? 'Choose a stock' : 'Any stock in my portfolio'}</option>
-              {holdings.map((h) => <option key={h.symbol} value={h.symbol}>{h.symbol}</option>)}
+              {watched.length > 0 ? (
+                <>
+                  <optgroup label="My stocks">{holdings.map((h) => <option key={h.symbol} value={h.symbol}>{h.symbol}</option>)}</optgroup>
+                  <optgroup label="Watchlist">{watched.map((w) => <option key={w.symbol} value={w.symbol}>{w.symbol}</option>)}</optgroup>
+                </>
+              ) : (
+                holdings.map((h) => <option key={h.symbol} value={h.symbol}>{h.symbol}</option>)
+              )}
             </select>
           </label>
           {kind === 'drop' ? (

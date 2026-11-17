@@ -15,6 +15,7 @@ export function getConfig(env = process.env) {
     cronSecret: env.CRON_SECRET || '',
     timezone: 'Asia/Kolkata',
     maxHoldingsPerUser: int(env.MAX_HOLDINGS_PER_USER, 50),
+    maxWatchlistPerUser: int(env.MAX_WATCHLIST_PER_USER, 50),
     maxRulesPerUser: int(env.MAX_RULES_PER_USER, 20),
     sessionDays: 30,
     google: {

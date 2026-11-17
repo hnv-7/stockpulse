@@ -77,6 +77,20 @@ CREATE TABLE IF NOT EXISTS sale_lots (
 );
 CREATE INDEX IF NOT EXISTS idx_sale_lots_sale ON sale_lots (sale_id);
 
+-- Stocks a user follows without (necessarily) holding them. added_price is the price when they were added, so the
+-- list can show the move since; it is restated, like everything else in old shares, when a split is confirmed.
+CREATE TABLE IF NOT EXISTS watchlist (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  symbol      TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  note        TEXT NOT NULL DEFAULT '',
+  added_price DOUBLE PRECISION CHECK (added_price > 0),
+  created_at  BIGINT NOT NULL,
+  UNIQUE (user_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist (symbol);
+
 CREATE TABLE IF NOT EXISTS daily_prices (
   symbol TEXT NOT NULL,
   date   DATE NOT NULL,

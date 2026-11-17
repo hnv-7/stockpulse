@@ -14,6 +14,7 @@ const rupees = (x) => `₹${x.toLocaleString('en-IN', { minimumFractionDigits: 2
 
 /**
  * Pure: which rules fire right now?
+ * holdings: what the user holds, plus stocks they only watch marked {watchOnly: true}
  * rules: drop rules {id, kind?: 'drop', symbol|null, window, threshold_pct, enabled}
  *        price rules {id, kind: 'price', symbol, direction: 'above'|'below', target_price, enabled}
  * Returns [{rule, holding, price, dropPct, message}]  (dropPct is null for price rules)
@@ -38,7 +39,8 @@ export function evaluateRules({ rules, holdings, seriesBySymbol, latestBySymbol,
       continue;
     }
     const threshold = rule.threshold_pct;
-    const targets = rule.symbol ? holdings.filter((h) => h.symbol === rule.symbol) : holdings;
+    // "Any stock" means any stock in the portfolio: stocks that are only watched need a rule of their own.
+    const targets = rule.symbol ? holdings.filter((h) => h.symbol === rule.symbol) : holdings.filter((h) => !h.watchOnly);
     for (const h of targets) {
       const price = latestBySymbol.get(h.symbol);
       if (price == null) continue;

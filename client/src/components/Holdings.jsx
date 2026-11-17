@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
 import { money, price, signedMoney, pct, tone, timeAgo } from '../format.js';
+import SymbolSearch from './SymbolSearch.jsx';
 
 // Latest allowed purchase date (today in India, matching the server's rule).
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -10,7 +11,6 @@ const niceDate = (d) =>
 
 function AddForm({ onAdded }) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
   const [picked, setPicked] = useState(null);
   const [quantity, setQuantity] = useState('');
   const [invested, setInvested] = useState('');
@@ -19,54 +19,6 @@ function AddForm({ onAdded }) {
   const [notice, setNotice] = useState('');
   const [duplicate, setDuplicate] = useState(null); // symbol already held, awaiting the user's OK to add to it
   const [busy, setBusy] = useState(false);
-  const [active, setActive] = useState(-1); // highlighted suggestion, -1 = none
-  const timer = useRef();
-  const latest = useRef('');
-  const listRef = useRef();
-
-  const open = !picked && results.length > 0;
-
-  const onQuery = (v) => {
-    setQuery(v);
-    setDuplicate(null);
-    setPicked(null);
-    setActive(-1);
-    clearTimeout(timer.current);
-    latest.current = v.trim();
-    if (latest.current.length < 2) return setResults([]);
-    timer.current = setTimeout(() => {
-      const q = latest.current;
-      api
-        .search(q)
-        .then((r) => { if (q === latest.current) setResults(r); }) // ignore out-of-date responses
-        .catch(() => setResults([]));
-    }, 300);
-  };
-
-  const pick = (r) => {
-    setPicked(r);
-    setQuery(r.symbol);
-    setResults([]);
-    setActive(-1);
-  };
-
-  const onKeyDown = (e) => {
-    if (!open) return;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const step = e.key === 'ArrowDown' ? 1 : -1;
-      const next = (active + step + results.length) % results.length;
-      setActive(next);
-      listRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter' && active >= 0) {
-      e.preventDefault(); // pick the suggestion instead of submitting the form
-      pick(results[active]);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      setResults([]);
-      setActive(-1);
-    }
-  };
 
   const submit = async (e, merge = false) => {
     e?.preventDefault();
@@ -92,7 +44,7 @@ function AddForm({ onAdded }) {
         );
       }
       setDuplicate(null);
-      setQuery(''); setResults([]); setPicked(null); setQuantity(''); setInvested(''); setPurchaseDate('');
+      setQuery(''); setPicked(null); setQuantity(''); setInvested(''); setPurchaseDate('');
       onAdded();
     } catch (err) {
       if (err.status === 409) setDuplicate(symbol);
@@ -105,40 +57,7 @@ function AddForm({ onAdded }) {
   return (
     <form className="card form" onSubmit={submit}>
       <h2>Add a stock</h2>
-      <label>
-        Company or symbol
-        <input
-          value={query}
-          onChange={(e) => onQuery(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="e.g. Infosys or INFY.NS"
-          required
-          maxLength={40}
-          autoComplete="off"
-          role="combobox"
-          aria-expanded={open}
-          aria-controls="stock-suggestions"
-          aria-autocomplete="list"
-          aria-activedescendant={open && active >= 0 ? `stock-opt-${active}` : undefined}
-        />
-      </label>
-      {open && (
-        <ul className="suggest" id="stock-suggestions" role="listbox" ref={listRef}>
-          {results.map((r, i) => (
-            <li
-              key={r.symbol}
-              id={`stock-opt-${i}`}
-              role="option"
-              aria-selected={i === active}
-              className={i === active ? 'active' : ''}
-              onMouseEnter={() => setActive(i)}
-              onMouseDown={(e) => { e.preventDefault(); pick(r); }}
-            >
-              <strong>{r.symbol}</strong> <span className="muted">{r.name} · {r.exchange}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <SymbolSearch id="add-stock" query={query} setQuery={setQuery} picked={picked} setPicked={setPicked} onType={() => setDuplicate(null)} />
       <div className="row">
         <label>
           Purchase date (optional)
@@ -669,7 +588,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
  * A split or bonus issue found for one of your stocks. Nothing changes until you confirm it, with the ratio
  * pre-filled from Yahoo (or from the price move, when the two disagree) and editable.
  */
-function SplitReview({ r, onChanged, onMessage }) {
+export function SplitReview({ r, onChanged, onMessage }) {
   const [before, setBefore] = useState(String(r.suggested.denominator));
   const [after, setAfter] = useState(String(r.suggested.numerator));
   const [busy, setBusy] = useState(false);
@@ -701,8 +620,10 @@ function SplitReview({ r, onChanged, onMessage }) {
     <section className="card split-review" aria-labelledby={`split-${r.id}`}>
       <h2 id={`split-${r.id}`}>Split or bonus issue: {r.symbol}</h2>
       <p>
-        {r.name} had a split or bonus issue on <strong>{niceDate(r.exDate)}</strong>. Your figures for it are still in the old
-        shares, so its value looks lower than it is. Check the ratio with your broker and confirm.
+        {r.name} had a split or bonus issue on <strong>{niceDate(r.exDate)}</strong>.{' '}
+        {r.lots.count > 0
+          ? 'Your figures for it are still in the old shares, so its value looks lower than it is. Check the ratio with your broker and confirm.'
+          : 'Your figures for it are still in the old shares. Check the ratio and confirm.'}
       </p>
       {r.suggested.mismatch && r.priceRatio != null && (
         <div className="warn box" role="note">
@@ -728,6 +649,7 @@ function SplitReview({ r, onChanged, onMessage }) {
           <li>{plural(r.sales, 'earlier sale is', 'earlier sales are')} restated in the new shares. What you received and the profit stay the same.</li>
         )}
         {r.priceTargets > 0 && <li>{plural(r.priceTargets, 'price target is', 'price targets are')} divided by the same ratio.</li>}
+        {r.watching && <li>The price on your watchlist from when you added it is divided by the same ratio.</li>}
       </ul>
       {error && <div className="error" role="alert">{error}</div>}
       <div className="split-actions">
