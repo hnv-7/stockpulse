@@ -145,3 +145,17 @@ tr.sell-row > td { padding: 0; }
 .bench-block p { margin: 8px 0 0; }
 .bench-chart-head { margin-top: 4px; }
 .bench-key { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; }
+
+/* Capital gains */
+.gains-actions { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.gains-year { display: flex; flex-direction: column; gap: 2px; }
+.gains-notes { margin: 12px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+.gains-notes li + li { margin-top: 4px; }
+.gains-unrealised { display: flex; flex-wrap: wrap; gap: 12px 32px; margin: 8px 0 16px; }
+.gains-unrealised > div { display: flex; flex-direction: column; }
+.gains-unrealised strong { font-size: 18px; }
+.gains-footnote { margin: 0 4px 16px; }
+.term { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; border: 1px solid; }
+.term.long { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+.term.short { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+.term.unknown { color: var(--muted); background: #f9fafb; border-color: var(--line); }

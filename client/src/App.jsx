@@ -4,6 +4,7 @@ import { timeAgo } from './format.js';
 import Dashboard from './components/Dashboard.jsx';
 import Holdings from './components/Holdings.jsx';
 import Watchlist from './components/Watchlist.jsx';
+import CapitalGains from './components/CapitalGains.jsx';
 import Alerts from './components/Alerts.jsx';
 import Account from './components/Account.jsx';
 import Login from './components/Login.jsx';
@@ -13,6 +14,7 @@ const TABS = [
   ['dashboard', 'Dashboard'],
   ['holdings', 'My Stocks'],
   ['watchlist', 'Watchlist'],
+  ['gains', 'Capital gains'],
   ['alerts', 'Alerts'],
   ['account', 'Account'],
 ];
@@ -92,6 +94,7 @@ function Portfolio({ me, setMe, onSignedOut }) {
         )}
         {tab === 'holdings' && <Holdings onChange={load} />}
         {tab === 'watchlist' && <Watchlist onChange={load} />}
+        {tab === 'gains' && <CapitalGains />}
         {tab === 'alerts' && <Alerts onRead={load} />}
         {tab === 'account' && (
           <Account
