@@ -8,7 +8,7 @@ import { istDate, addDays, isStale } from './dates.js';
 import { toCsv, importHoldings, isPastOrToday, MAX_IMPORT_ROWS } from './portfolio-io.js';
 import { previewImport } from './import-mapping.js';
 import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
-import { buildReport, buildWatchlist, portfolioHistory } from './analytics.js';
+import { buildReport, buildWatchlist, portfolioHistory, groupSales, datedSales } from './analytics.js';
 import { suggestRatio } from './splits.js';
 import { BENCHMARK, indexChange, sameMoneyInIndex, relativePerformance } from './benchmark.js';
 import { capitalGains, openPositions, fyOf, TAX_RULES } from './capital-gains.js';
@@ -456,7 +456,9 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       const s = seriesBySymbol.get(h.symbol);
       if (s.length) latestBySymbol.set(h.symbol, s[s.length - 1].close);
     }
-    return { holdings, today, seriesBySymbol, latestBySymbol, period };
+    // Past sales count in the portfolio XIRR as money taken out.
+    const sales = groupSales(await store.listSaleLotsForGains(userId));
+    return { holdings, today, seriesBySymbol, latestBySymbol, period, sales };
   }
 
   api.get('/report', async (req, res) => {
@@ -547,18 +549,20 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const ctx = await loadAll(req.session.user.id, period);
     const report = buildReport(ctx);
     const { today } = ctx;
-    // The XIRR comparison uses the holdings the portfolio XIRR uses: every purchase dated, and a price known.
+    // The XIRR comparison uses what the portfolio XIRR uses: holdings with every purchase dated and a price known,
+    // and sales with every purchase they used up dated.
     const rows = new Map(report.holdings.map((r) => [r.symbol, r]));
     const lotsOf = (h) => (h.lots?.length ? h.lots : [{ invested: h.invested, purchase_date: h.purchase_date }]);
     const dated = ctx.holdings.filter((h) => lotsOf(h).every((l) => l.purchase_date) && rows.get(h.symbol)?.value != null);
     const lots = dated.flatMap(lotsOf);
-    const earliest = lots.map((l) => l.purchase_date).sort()[0];
+    const sales = datedSales(ctx.sales, today);
+    const earliest = [...lots, ...sales.flatMap((s) => s.lots)].map((l) => l.purchase_date).sort()[0];
     const yearAgo = addDays(today, -400);
     const indexSeries = await indexSeriesFrom(earliest && earliest < yearAgo ? earliest : yearAgo);
     if (!indexSeries.length) return res.json({ ...BENCHMARK, available: false });
 
     const indexNow = indexSeries[indexSeries.length - 1].close;
-    const same = sameMoneyInIndex({ lots, indexSeries, indexNow, today });
+    const same = sameMoneyInIndex({ lots, sales, indexSeries, indexNow, today });
     res.json({
       ...BENCHMARK,
       available: true,
@@ -569,7 +573,9 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
         indexXirrPct: same.xirrPct,
         invested: same.invested,
         yourValue: dated.reduce((sum, h) => sum + rows.get(h.symbol).value, 0),
+        yourReceived: sales.reduce((sum, s) => sum + s.received, 0),
         indexValue: same.value,
+        indexReceived: same.received,
         coverage: report.totals.xirrCoverage,
       },
     });

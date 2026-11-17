@@ -82,6 +82,30 @@ function versus(gap, name) {
   return `${Math.abs(gap).toFixed(2)} points ${gap > 0 ? 'ahead of' : 'behind'} ${name}`;
 }
 
+/**
+ * "₹X now, against ₹Y …", counting money taken out in sales on both sides when there were any: each purchase you sold
+ * is matched by Nifty 50 bought and sold on the same days.
+ */
+function SinceBoughtText({ sp, name, partial }) {
+  const yours = sp.yourValue + (sp.yourReceived ?? 0);
+  const theirs = sp.indexValue + (sp.indexReceived ?? 0);
+  const gap = yours - theirs;
+  return (
+    <p className="small">
+      {sp.yourReceived > 0 ? (
+        <>
+          {money(yours)} in all ({money(sp.yourValue)} still held and {money(sp.yourReceived)} taken out in sales), against{' '}
+          {money(theirs)} if each of your purchases had been {name}, held for the same days.{' '}
+        </>
+      ) : (
+        <>{money(sp.yourValue)} now, against {money(sp.indexValue)} if the same {money(sp.invested)} had gone into {name} on the days you bought.{' '}</>
+      )}
+      <strong className={tone(gap)}>{money(Math.abs(gap))} {gap >= 0 ? 'ahead' : 'behind'}</strong>
+      {partial && <span className="muted"> Covers {partial}: the ones with every purchase dated.</span>}
+    </p>
+  );
+}
+
 /** Your stocks against Nifty 50: this period, since you bought (same money, same days), and over time. */
 function BenchmarkCard({ period }) {
   const [summary, setSummary] = useState(null);
@@ -109,7 +133,11 @@ function BenchmarkCard({ period }) {
   const sp = summary.sincePurchase;
   const points = hist?.points ?? [];
   const last = points[points.length - 1];
-  const partial = sp && sp.coverage && sp.coverage.holdings < sp.coverage.of;
+  // e.g. "3 of 4 holdings and 2 of 3 sales", naming only what is partly covered.
+  const partial = sp?.coverage && [
+    sp.coverage.holdings < sp.coverage.of && `${sp.coverage.holdings} of ${sp.coverage.of} holdings`,
+    sp.coverage.sales < sp.coverage.salesOf && `${sp.coverage.sales} of ${sp.coverage.salesOf} sales`,
+  ].filter(Boolean).join(' and ');
   return (
     <section className="card">
       <div className="card-head">
@@ -130,14 +158,7 @@ function BenchmarkCard({ period }) {
             <>
               <div className="bench-row"><span>Your XIRR</span><strong className={tone(sp.yourXirrPct)}>{pct(sp.yourXirrPct)}</strong></div>
               <div className="bench-row"><span>{name}, same days</span><strong className={tone(sp.indexXirrPct)}>{pct(sp.indexXirrPct)}</strong></div>
-              <p className="small">
-                {money(sp.yourValue)} now, against {money(sp.indexValue)} if the same {money(sp.invested)} had gone into {name} on the
-                days you bought.{' '}
-                <strong className={tone(sp.yourValue - sp.indexValue)}>
-                  {money(Math.abs(sp.yourValue - sp.indexValue))} {sp.yourValue >= sp.indexValue ? 'ahead' : 'behind'}
-                </strong>
-                {partial && <span className="muted"> Covers {sp.coverage.holdings} of {sp.coverage.of} holdings: the ones with every purchase dated.</span>}
-              </p>
+              <SinceBoughtText sp={sp} name={name} partial={partial} />
             </>
           ) : (
             <p className="muted small">Add purchase dates to your holdings to compare them with {name} bought on the same days.</p>
@@ -315,9 +336,12 @@ function Insights({ report, period, onPick }) {
 }
 
 function xirrSub(c) {
-  if (!c || c.holdings === 0) return 'Add purchase dates to see this';
-  if (c.holdings === c.of) return 'All holdings dated';
-  return `${c.holdings} of ${c.of} holdings dated (${c.investedPct.toFixed(0)}% of invested)`;
+  if (!c || (c.holdings === 0 && !c.sales)) return 'Add purchase dates to see this';
+  const parts = [];
+  if (c.of > 0) parts.push(c.holdings === c.of ? 'All holdings dated' : `${c.holdings} of ${c.of} holdings dated (${c.investedPct.toFixed(0)}% of invested)`);
+  // Sales count as money taken out, so selling doesn't change the rate you earned.
+  if (c.salesOf) parts.push(c.sales === c.salesOf ? `includes ${c.sales} ${c.sales === 1 ? 'sale' : 'sales'}` : `${c.sales} of ${c.salesOf} sales dated`);
+  return parts.join(' · ');
 }
 
 export default function Dashboard({ report, period, setPeriod, goToStocks }) {

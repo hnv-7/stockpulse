@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setup } from './helpers.js';
 import { istDate, addDays } from '../src/dates.js';
-import { xirr, daysBetween } from '../src/analytics.js';
+import { xirr, xirrFlows, daysBetween } from '../src/analytics.js';
 import { BENCHMARK, sameMoneyInIndex, indexChange, relativePerformance } from '../src/benchmark.js';
 
 const series = (pairs) => pairs.map(([date, close]) => ({ date, close }));
@@ -25,6 +25,28 @@ test('sameMoneyInIndex buys the index on each purchase day (or the last close be
   assert.equal(sameMoneyInIndex({ lots: [{ invested: 1, purchase_date: '2020-01-01' }], indexSeries, indexNow: 150, today: '2026-06-30' }), null,
     'before the index history starts');
   assert.equal(sameMoneyInIndex({ lots: [], indexSeries, indexNow: 150, today: '2026-06-30' }), null);
+});
+
+test('sameMoneyInIndex holds the index for the same days as each purchase, selling it when the shares were sold', () => {
+  const indexSeries = series([['2025-01-01', 100], ['2025-07-01', 110], ['2026-01-01', 120]]);
+  const r = sameMoneyInIndex({
+    lots: [{ invested: 2000, purchase_date: '2026-01-01' }],
+    sales: [{ saleDate: '2025-07-01', lots: [{ invested: 1000, purchase_date: '2025-01-01' }] }],
+    indexSeries,
+    indexNow: 150,
+    today: '2026-06-30',
+  });
+  assert.equal(r.invested, 3000);
+  assert.equal(r.received, (1000 / 100) * 110);
+  assert.equal(r.value, (2000 / 120) * 150);
+  const days = (date) => daysBetween(date, '2026-06-30');
+  const expected = xirrFlows([
+    { amount: -2000, days: days('2026-01-01') },
+    { amount: -1000, days: days('2025-01-01') },
+    { amount: 1100, days: days('2025-07-01') },
+    { amount: r.value, days: 0 },
+  ]);
+  assert.equal(r.xirrPct, expected * 100);
 });
 
 test('indexChange measures the index over a report period', () => {
@@ -107,7 +129,7 @@ test('the dashboard comparison: this period, since you bought, and over time', a
     assert.equal(sp.yourValue, 1000);
     assert.equal(round(sp.indexValue), round((1500 / 20000) * 22220));
     assert.ok(sp.yourXirrPct < 0 && sp.indexXirrPct > 0, `${sp.yourXirrPct} vs ${sp.indexXirrPct}`);
-    assert.deepEqual(sp.coverage, { holdings: 1, of: 1, investedPct: 100 });
+    assert.deepEqual(sp.coverage, { holdings: 1, of: 1, investedPct: 100, sales: 0, salesOf: 0 });
 
     const h = (await u.call('GET', '/api/benchmark/history?range=1m')).body;
     assert.deepEqual(h.points.map((p) => [p.date, round(p.yoursPct), round(p.indexPct)]), [
@@ -119,6 +141,37 @@ test('the dashboard comparison: this period, since you bought, and over time', a
     // Index prices are shared and outlive any one account.
     assert.equal((await u.call('DELETE', '/api/me')).status, 204);
     assert.ok(Number((await t.db.query('SELECT COUNT(*) AS c FROM daily_prices WHERE symbol = $1', [BENCHMARK.symbol])).rows[0].c) > 0);
+  } finally {
+    await t.close();
+  }
+});
+
+test('sales count on both sides of the since-bought comparison', async () => {
+  const m = market();
+  const t = await setup({ prices: { 'AAA.NS': 100, [BENCHMARK.symbol]: 22220 }, deps: m.deps });
+  try {
+    const u = await t.login('a@example.test');
+    await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 10, invested: 1500, purchaseDate: d(-40) });
+    const id = (await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 10, invested: 1300, purchaseDate: d(-8), merge: true })).body.id;
+    // Sells the older 10 shares yesterday for 1,100 in all.
+    await u.call('POST', `/api/holdings/${id}/sell`, { quantity: 10, salePrice: 110, saleDate: d(-1) });
+    await poll(t);
+
+    const sp = (await u.call('GET', '/api/benchmark?period=1w')).body.sincePurchase;
+    assert.deepEqual([sp.yourValue, sp.yourReceived, sp.invested], [1000, 1100, 2800]);
+    assert.equal(round(sp.indexReceived), round((1500 / 20000) * 22000), 'Nifty sold on the same day as the shares');
+    assert.equal(round(sp.indexValue), round((1300 / 21000) * 22220));
+    assert.deepEqual([sp.coverage.sales, sp.coverage.salesOf], [1, 1]);
+    const days = (n) => -n;
+    const yours = xirrFlows([
+      { amount: -1300, days: days(-8) },
+      { amount: -1500, days: days(-40) },
+      { amount: 1100, days: days(-1) },
+      { amount: 1000, days: 0 },
+    ]) * 100;
+    assert.equal(round(sp.yourXirrPct), round(yours));
+    const report = (await u.call('GET', '/api/report?period=1w')).body;
+    assert.equal(report.totals.xirrPct, sp.yourXirrPct, 'the dashboard XIRR is the same figure');
   } finally {
     await t.close();
   }
