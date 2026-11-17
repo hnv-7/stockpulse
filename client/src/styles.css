@@ -159,3 +159,23 @@ tr.sell-row > td { padding: 0; }
 .term.long { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
 .term.short { color: #92400e; background: #fffbeb; border-color: #fde68a; }
 .term.unknown { color: var(--muted); background: #f9fafb; border-color: var(--line); }
+
+/* Header: market closed for the day (weekend or holiday) */
+.market-closed { padding: 2px 8px; border-radius: 10px; background: #f3f4f6; color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+/* Sectors */
+.alloc { list-style: none; margin: 8px 0 12px; padding: 0; display: grid; gap: 10px; }
+.alloc-head { display: flex; justify-content: space-between; gap: 12px; }
+.alloc-bar { height: 8px; background: #eef0f3; border-radius: 4px; overflow: hidden; margin: 4px 0 2px; }
+.alloc-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+
+/* Dividends */
+.div-recent { margin-top: 14px; }
+.div-list { list-style: none; margin: 0; padding: 0; }
+.div-list li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.div-list li:last-child { border-bottom: 0; }
+
+/* Account: Telegram */
+.telegram { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.telegram h3 { margin: 0; }
+.telegram p { margin: 0; }

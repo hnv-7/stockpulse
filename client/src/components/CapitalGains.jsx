@@ -160,14 +160,47 @@ function StillHeld({ open }) {
   );
 }
 
+/** Dividends with an ex-date in the year: income, taxed at your slab rate rather than as capital gains. */
+function DividendIncome({ data, dividends }) {
+  if (!dividends) return null;
+  const rows = dividends.payments.filter((p) => p.exDate >= data.from && p.exDate <= data.to);
+  const total = rows.reduce((s, p) => s + p.amount, 0);
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Dividends in {data.label}</h2>
+        <strong className={total > 0 ? 'pos' : ''}>{money(total)}</strong>
+      </div>
+      <p className="muted small">
+        Dividends are added to your income and taxed at your slab rate, not as capital gains. Companies deduct tax at source
+        above a yearly limit; check Form 26AS or your annual statement.
+      </p>
+      {rows.length > 0 && (
+        <ul className="div-list">
+          {rows.map((p) => (
+            <li key={`${p.symbol}-${p.exDate}`}>
+              <span><strong>{p.symbol}</strong> <span className="muted small">ex-date {niceDate(p.exDate)}</span></span>
+              <strong>{money(p.amount)}</strong>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export default function CapitalGains() {
   const [fy, setFy] = useState(null); // null = the current financial year
   const [data, setData] = useState(null);
+  const [dividends, setDividends] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
     setError('');
     api.capitalGains(fy).then(setData).catch((e) => setError(e.message));
   }, [fy]);
+  useEffect(() => {
+    api.dividends().then(setDividends).catch(() => setDividends(null));
+  }, []);
 
   if (error) return <div className="error" role="alert">{error}</div>;
   if (!data) return <p className="muted">Loading…</p>;
@@ -200,6 +233,7 @@ export default function CapitalGains() {
       </section>
 
       {data.current && data.open && <StillHeld open={data.open} />}
+      <DividendIncome data={data} dividends={dividends} />
 
       <p className="muted small gains-footnote">
         An estimate to plan with, not tax advice. It uses the rates for listed shares where STT was paid, plus {data.rates.cess}% cess,

@@ -25,11 +25,19 @@ export async function setup({ prices = { 'AAA.NS': 100, 'BBB.NS': 50 }, env = {}
     config,
     oidcLib,
     deps: {
-      notifier: { emailEnabled: true, sendEmail: async (to, subject, text) => (sent.push({ to, subject, text }), true) },
+      notifier: {
+        emailEnabled: true,
+        sendEmail: async (to, subject, text) => (sent.push({ to, subject, text }), true),
+        telegramEnabled: true,
+        // A chat id starting "blocked" behaves like a user who blocked the bot.
+        sendTelegram: async (chatId, text) => (sent.push({ telegram: chatId, text }), String(chatId).startsWith('blocked') ? { ok: false, blocked: true } : { ok: true }),
+      },
       getQuotes: async (symbols) =>
         new Map(symbols.filter((s) => prices[s]).map((s) => [s, { symbol: s, price: prices[s], name: s }])),
       getDailyHistory: async () => history,
       getSplits: async () => ({ points: history, splits: [] }),
+      getProfile: async () => null,
+      getDividends: async () => [],
       getQuote: async (s) => (prices[s] ? { symbol: s, price: prices[s], name: `${s} Ltd` } : null),
       searchSymbols: async () => [{ symbol: 'AAA.NS', name: 'Triple A Ltd', exchange: 'NSE' }],
       ...extraDeps,

@@ -206,6 +206,105 @@ function BenchmarkCard({ period }) {
   );
 }
 
+const ticker = (symbol) => symbol.replace(/\.(NS|BO)$/, '');
+const exDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+/** How the portfolio splits by sector, and how much sits in its largest stocks. */
+function AllocationCard() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    api.allocation().then(setData).catch(() => setData(null));
+  }, []);
+  if (!data || !data.sectors.length) return null;
+  const [largest] = data.top;
+  return (
+    <section className="card">
+      <h2>Where your money is</h2>
+      <ul className="alloc">
+        {data.sectors.map((s) => (
+          <li key={s.sector ?? 'unknown'}>
+            <div className="alloc-head">
+              <span className={s.sector ? '' : 'muted'}>{s.sector ?? 'Sector not known'}</span>
+              <strong>{s.weightPct.toFixed(1)}%</strong>
+            </div>
+            <div className="alloc-bar" aria-hidden="true"><span style={{ width: `${s.weightPct}%` }} /></div>
+            <div className="muted small">{money(s.value)} · {s.stocks.map(ticker).join(', ')}</div>
+          </li>
+        ))}
+      </ul>
+      <p className="small">
+        Your largest stock, {ticker(largest.symbol)}, is {largest.weightPct.toFixed(1)}% of your portfolio
+        {data.top.length > 1 && <>; your top {data.top.length} ({data.top.map((t) => ticker(t.symbol)).join(', ')}) are {data.topPct.toFixed(1)}%</>}.
+      </p>
+    </section>
+  );
+}
+
+/** Dividends received, by stock and most recent first. */
+function DividendsCard() {
+  const [data, setData] = useState(null);
+  const [all, setAll] = useState(false);
+  useEffect(() => {
+    api.dividends().then(setData).catch(() => setData(null));
+  }, []);
+  if (!data) return null;
+  if (!data.payments.length) {
+    return (
+      <section className="card">
+        <h2>Dividends</h2>
+        <p className="muted">
+          {data.pending > 0 ? 'Looking up dividends for your stocks…' : 'No dividends since you bought your stocks.'}
+        </p>
+      </section>
+    );
+  }
+  const shown = all ? data.payments : data.payments.slice(0, 5);
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Dividends</h2>
+        <div className="sell-total">
+          <span className="muted small">Last 12 months</span>
+          <strong className="pos">{money(data.last12m)}</strong>
+        </div>
+      </div>
+      <p className="muted small">
+        {money(data.total)} received since you bought, before any tax deducted. Worked out from the shares you held going into each
+        ex-dividend date. Not included in XIRR or the Nifty 50 comparison, which are price-only.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Stock</th><th className="r">Last 12 months</th><th className="r">Since you bought</th><th className="r">Yield on cost</th></tr>
+          </thead>
+          <tbody>
+            {data.byStock.map((s) => (
+              <tr key={s.symbol}>
+                <td><strong>{s.symbol}</strong><div className="muted small">{s.held ? s.name : `${s.name} · sold`}</div></td>
+                <td className="r">{money(s.last12m)}</td>
+                <td className="r">{money(s.total)}</td>
+                <td className="r" title="Last 12 months' dividends per share, on the shares you hold now, against what they cost">{s.yieldOnCostPct == null ? '—' : `${s.yieldOnCostPct.toFixed(2)}%`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <h3 className="div-recent">Payments</h3>
+      <ul className="div-list">
+        {shown.map((p) => (
+          <li key={`${p.symbol}-${p.exDate}`}>
+            <span><strong>{ticker(p.symbol)}</strong> <span className="muted small">ex-date {exDay(p.exDate)} · {Number(p.shares.toFixed(4))} × {price(p.perShare)}</span></span>
+            <strong>{money(p.amount)}</strong>
+          </li>
+        ))}
+      </ul>
+      {data.payments.length > 5 && (
+        <button className="link" onClick={() => setAll(!all)}>{all ? 'Show fewer' : `Show all ${data.payments.length} payments`}</button>
+      )}
+    </section>
+  );
+}
+
 function ContributionChart({ rows, period }) {
   const data = rows
     .filter((r) => r.periodChangeValue != null)
@@ -409,6 +508,8 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
       <ContributionChart rows={report.holdings} period={period} />
       <PortfolioChart />
       <BenchmarkCard period={period} />
+      <AllocationCard />
+      <DividendsCard />
 
       <section className="card">
         <h2>All holdings <span className="muted">({report.holdings.length})</span></h2>

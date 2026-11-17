@@ -51,6 +51,8 @@ export function getQuote(symbol) {
       symbol,
       price: q.regularMarketPrice,
       name: q.longName || q.shortName || symbol,
+      // When that price traded: on a holiday or weekend it is the last session's.
+      marketTime: q.regularMarketTime instanceof Date ? q.regularMarketTime.getTime() : null,
     };
   });
 }
@@ -88,6 +90,27 @@ export async function getDailyHistoryWithSplits(symbol, days = 400) {
     .filter((q) => typeof q.close === 'number')
     .map((q) => ({ date: istDate(q.date.getTime()), close: q.close }));
   return { points, splits: parseSplits(res.events?.splits) };
+}
+
+/** Dividends from a chart response, as [{date, amount}] per share with IST ex-dates, oldest first. */
+export function parseDividends(events) {
+  return (Array.isArray(events) ? events : [])
+    .filter((d) => d?.date instanceof Date && d.amount > 0)
+    .map((d) => ({ date: istDate(d.date.getTime()), amount: d.amount }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+/** Dividends per share paid since `fromDate` (YYYY-MM-DD), by ex-date. */
+export async function getDividends(symbol, fromDate) {
+  const res = await withRetry(() => yf.chart(symbol, { period1: new Date(`${fromDate}T00:00:00Z`), interval: '1d', events: 'div' }));
+  return parseDividends(res.events?.dividends);
+}
+
+/** A company's sector and industry, or null when Yahoo has none (common for small companies). */
+export async function getProfile(symbol) {
+  const res = await withRetry(() => yf.quoteSummary(symbol, { modules: ['assetProfile'] }));
+  const p = res?.assetProfile;
+  return p?.sector ? { sector: p.sector, industry: p.industry ?? null } : null;
 }
 
 /** Daily closes, oldest first, as [{date, close}] (dates in IST). */

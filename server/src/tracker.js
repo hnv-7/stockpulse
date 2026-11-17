@@ -28,6 +28,8 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
 
   // The last index history fetch (per server instance): when, and from which date.
   let indexTried = null;
+  // A fetch under way, which callers arriving meanwhile wait for instead of answering with what is stored so far.
+  let indexFetch = null;
   /** A fetch that reached back at least as far is not repeated within this time (Yahoo may simply have no older data). */
   const INDEX_RETRY_MS = 6 * 3600 * 1000;
 
@@ -36,6 +38,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
    * they are fetched once and kept; the hourly poll and nightly refresh keep the recent end up to date.
    */
   async function ensureIndexHistory(fromDate, now = Date.now()) {
+    while (indexFetch) await indexFetch.catch(() => {});
     const today = istDate(now);
     const bounds = await store.seriesBounds(BENCHMARK.symbol);
     const reaches = bounds && bounds.first <= addDays(fromDate, 5);
@@ -45,12 +48,15 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
     const from = reaches ? bounds.last : fromDate;
     if (indexTried && now - indexTried.at < INDEX_RETRY_MS && indexTried.from <= from) return !!bounds;
     indexTried = { at: now, from };
+    indexFetch = backfill(BENCHMARK.symbol, daysBetween(from, today) + 15);
     try {
-      await backfill(BENCHMARK.symbol, daysBetween(from, today) + 15);
+      await indexFetch;
       return true;
     } catch (err) {
       log('error', 'index history fetch failed', { error: err?.message });
       return !!bounds;
+    } finally {
+      indexFetch = null;
     }
   }
 
@@ -69,14 +75,23 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
     return Math.abs(ratio - 1) < RATIO_TOLERANCE ? null : ratio;
   }
 
-  /** Ask every user whose shares a new split may change to confirm it (by notification, and email if they opted in). */
+  /** Send an alert by email (if the user opted in) and Telegram (if they linked a chat). */
+  async function deliver(user, subject, text) {
+    if (!user || !notifier) return;
+    if (user.alertEmail) await notifier.sendEmail(user.email, subject, text);
+    if (user.telegramChatId && notifier.telegramEnabled) {
+      const r = await notifier.sendTelegram(user.telegramChatId, `${subject}\n\n${text}`);
+      if (r?.blocked) await store.unlinkTelegramChat(user.telegramChatId);
+    }
+  }
+
+  /** Ask every user whose shares a new split may change to confirm it (in the app, and by email or Telegram). */
   async function openSplitReviews(symbol, split, priceRatio, now) {
     const reviews = await store.createSplitReviews(symbol, split.date, istDayStart(split.date), now);
     const message = splitMessage({ symbol, exDate: split.date, reported: split, priceRatio });
     for (const { userId } of reviews) {
       await store.addNotification({ userId, ts: now, symbol, message });
-      const user = await store.getUser(userId);
-      if (user?.alertEmail && notifier) await notifier.sendEmail(user.email, `Stock Beat: ${symbol} split or bonus issue`, message);
+      await deliver(await store.getUser(userId), `Stock Beat: ${symbol} split or bonus issue`, message);
     }
     return reviews.length;
   }
@@ -164,9 +179,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
         fired++;
         // A price target is a one-off: pause it so it doesn't repeat every day while the price stays beyond it.
         if (hit.rule.kind === 'price') await store.disableRule(userId, hit.rule.id);
-        if (user?.alertEmail && notifier) {
-          await notifier.sendEmail(user.email, `Stock Beat alert: ${hit.holding.symbol}`, hit.message);
-        }
+        await deliver(user, `Stock Beat alert: ${hit.holding.symbol}`, hit.message);
       }
     }
     return fired;
@@ -193,7 +206,13 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
       const quotes = await fetchQuotes([...symbols, BENCHMARK.symbol]);
       const latest = new Map();
       const today = istDate(now);
-      for (const [symbol, q] of quotes) latest.set(symbol, q.price);
+      // Each price is stored as the close of the day it traded, so a holiday or weekend poll doesn't invent a session.
+      const tradedOn = new Map();
+      for (const [symbol, q] of quotes) {
+        latest.set(symbol, q.price);
+        const day = q.marketTime ? istDate(q.marketTime) : today;
+        tradedOn.set(symbol, day <= today ? day : today);
+      }
       const polled = symbols.filter((s) => latest.has(s)).length;
 
       // Splits are handled before anything compares today's price with older ones. A big jump from the last close
@@ -209,7 +228,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
       const unsettled = await checkSplits(symbols, now, suspect);
 
       await store.saveSnapshots([...latest].map(([symbol, price]) => ({ symbol, ts: now, price })));
-      await store.saveDailyCloses([...latest].map(([symbol, price]) => ({ symbol, date: today, close: price })));
+      await store.saveDailyCloses([...latest].map(([symbol, price]) => ({ symbol, date: tradedOn.get(symbol), close: price })));
 
       // A price target set in the old shares waits until its owner confirms the split; a stock whose prices couldn't
       // be corrected for a new split is left out of alerts until they are.

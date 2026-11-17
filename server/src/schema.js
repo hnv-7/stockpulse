@@ -170,6 +170,35 @@ CREATE INDEX IF NOT EXISTS idx_split_reviews_user ON split_reviews (user_id, sta
 -- How many of today's shares each share in a sale has become through splits confirmed since (1 = none).
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS split_factor DOUBLE PRECISION NOT NULL DEFAULT 1;
 
+-- Company details from Yahoo (shared): sector and industry, refreshed every few months. A NULL sector means Yahoo had
+-- none; fetched_at says when that was found, so it isn't asked again every time.
+CREATE TABLE IF NOT EXISTS stock_info (
+  symbol     TEXT PRIMARY KEY,
+  sector     TEXT,
+  industry   TEXT,
+  fetched_at BIGINT NOT NULL
+);
+
+-- Dividends per share by ex-date (shared), in today's shares as Yahoo reports them.
+CREATE TABLE IF NOT EXISTS dividends (
+  symbol  TEXT NOT NULL,
+  ex_date DATE NOT NULL,
+  amount  DOUBLE PRECISION NOT NULL CHECK (amount > 0),
+  PRIMARY KEY (symbol, ex_date)
+);
+-- How far back each symbol's dividends have been fetched.
+CREATE TABLE IF NOT EXISTS dividend_checks (
+  symbol     TEXT PRIMARY KEY,
+  from_date  DATE NOT NULL,
+  checked_at BIGINT NOT NULL
+);
+
+-- Telegram: the chat a user's alerts go to, and a short-lived code that links it (sent as /start <code>).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_expires BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_code ON users (telegram_link_code) WHERE telegram_link_code IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS notifications (
   id      BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
