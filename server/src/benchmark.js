@@ -1,4 +1,4 @@
-import { priceOnOrBefore, pctChange, referencePrice, daysBetween, xirr, heldPositions, activeOn } from './analytics.js';
+import { priceOnOrBefore, pctChange, referencePrice, daysBetween, xirrFlows, heldPositions, activeOn } from './analytics.js';
 
 /** The index everything is compared with. Index symbols start with "^" and are never held, watched or split. */
 export const BENCHMARK = { symbol: '^NSEI', name: 'Nifty 50' };
@@ -14,23 +14,47 @@ export function indexChange({ indexSeries, indexNow, today, period }) {
 }
 
 /**
- * The same money on the same days in the index: each purchase buys index units at that day's close (or the last
- * close before it) and they are valued at `indexNow`. lots: [{invested, purchase_date}], all dated.
- * Returns {invested, value, xirrPct}, or null when there is nothing to compare or the index has no price near some
- * purchase date (e.g. before the index history starts).
+ * The same money on the same days in the index: each purchase buys index units at that day's close (or the last close
+ * before it). Units bought for purchases still held are valued at `indexNow`; units bought for purchases since sold
+ * are sold on the same sale date, so the index is held for exactly the same days as the shares.
+ * lots: [{invested, purchase_date}] still held; sales: [{saleDate, lots: [{invested, purchase_date}]}]; all dated.
+ * Returns {invested, value, received, xirrPct}, or null when there is nothing to compare or the index has no price near
+ * some date (e.g. before the index history starts).
  */
-export function sameMoneyInIndex({ lots, indexSeries, indexNow, today }) {
-  if (!lots.length || !(indexNow > 0)) return null;
+export function sameMoneyInIndex({ lots, sales = [], indexSeries, indexNow, today }) {
+  if ((!lots.length && !sales.length) || !(indexNow > 0)) return null;
+  const closeNear = (date) => {
+    const p = priceOnOrBefore(indexSeries, date);
+    return p && daysBetween(p.date, date) <= MAX_GAP_DAYS ? p.close : null;
+  };
+  const flows = [];
   let invested = 0;
   let value = 0;
+  let received = 0;
   for (const l of lots) {
-    const entry = priceOnOrBefore(indexSeries, l.purchase_date);
-    if (!entry || daysBetween(entry.date, l.purchase_date) > MAX_GAP_DAYS) return null;
+    const entry = closeNear(l.purchase_date);
+    if (entry == null) return null;
     invested += l.invested;
-    value += (l.invested / entry.close) * indexNow;
+    value += (l.invested / entry) * indexNow;
+    flows.push({ amount: -l.invested, days: daysBetween(l.purchase_date, today) });
   }
-  const rate = xirr(lots.map((l) => ({ invested: l.invested, days: daysBetween(l.purchase_date, today) })), value);
-  return { invested, value, xirrPct: rate == null ? null : rate * 100 };
+  for (const s of sales) {
+    const exit = closeNear(s.saleDate);
+    if (exit == null) return null;
+    let out = 0;
+    for (const l of s.lots) {
+      const entry = closeNear(l.purchase_date);
+      if (entry == null) return null;
+      invested += l.invested;
+      out += (l.invested / entry) * exit;
+      flows.push({ amount: -l.invested, days: daysBetween(l.purchase_date, today) });
+    }
+    received += out;
+    flows.push({ amount: out, days: daysBetween(s.saleDate, today) });
+  }
+  flows.push({ amount: value, days: 0 });
+  const rate = xirrFlows(flows);
+  return { invested, value, received, xirrPct: rate == null ? null : rate * 100 };
 }
 
 /**

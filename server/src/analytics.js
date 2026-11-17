@@ -54,30 +54,61 @@ export function daysBetween(from, to) {
 }
 
 /**
- * XIRR (annualised, day-count/365 as in Excel) for money put in on known dates and worth `value` today.
- * lots: [{invested, days}] where days = days held up to today. Returns a fraction (0.12 = 12%), or null
- * when it is undefined (nothing held yet, no value, or no sensible rate).
+ * XIRR (annualised, day-count/365 as in Excel) for dated cash flows: [{amount, days}], with amount negative for money
+ * put in and positive for money taken out (sale proceeds, and today's value at days 0); days = how long ago.
+ * Returns a fraction (0.12 = 12%), or null when there is no sensible rate.
  *
- * The future value of the lots at rate r is invested*(1+r)^(days/365), which only grows with r, so the
- * rate that makes it equal today's value is found by bisection and cannot land on a wrong root.
+ * Each flow is carried forward to today at rate r: amount * (1+r)^(days/365). Near r = -100% that total is the money
+ * taken out most recently (positive), and for large r the earliest flow, money put in, outweighs everything, so a rate
+ * where the total is zero lies in between and bisection finds it. When all the money goes in before any comes out
+ * there is exactly one such rate.
  */
-export function xirr(lots, value) {
-  if (!(value > 0) || !lots.length || lots.some((l) => !(l.invested > 0) || !(l.days >= 0))) return null;
-  if (lots.every((l) => l.days === 0)) return null;
-  const gap = (r) => value - lots.reduce((s, l) => s + l.invested * (1 + r) ** (l.days / 365), 0);
+export function xirrFlows(flows) {
+  if (!flows.length || flows.some((f) => !Number.isFinite(f.amount) || !(f.days >= 0))) return null;
+  if (!flows.some((f) => f.amount < 0) || !flows.some((f) => f.amount > 0)) return null;
+  if (flows.every((f) => f.days === 0)) return null;
+  const total = (r) => flows.reduce((s, f) => s + f.amount * (1 + r) ** (f.days / 365), 0);
   let lo = -0.999999;
   let hi = 1;
-  while (gap(hi) > 0) {
+  while (total(hi) > 0) {
     hi *= 2;
     if (hi > 1e9) return null;
   }
   for (let i = 0; i < 200; i++) {
     const mid = (lo + hi) / 2;
-    if (gap(mid) > 0) lo = mid;
+    if (total(mid) > 0) lo = mid;
     else hi = mid;
   }
   return (lo + hi) / 2;
 }
+
+/**
+ * XIRR for money put in on known dates and worth `value` today. lots: [{invested, days}] where days = days held up to
+ * today. Null when nothing is held yet, there is no value, or no sensible rate.
+ */
+export function xirr(lots, value) {
+  if (!(value > 0) || !lots.length || lots.some((l) => !(l.invested > 0) || !(l.days >= 0))) return null;
+  return xirrFlows([...lots.map((l) => ({ amount: -l.invested, days: l.days })), { amount: value, days: 0 }]);
+}
+
+/**
+ * Sales as the XIRR sees them, from per-purchase sale rows (store.listSaleLotsForGains):
+ * [{saleId, saleDate, received, lots: [{invested, purchase_date}]}], received = sale value less charges.
+ */
+export function groupSales(saleLots) {
+  const bySale = new Map();
+  for (const l of saleLots) {
+    if (!bySale.has(l.saleId)) {
+      bySale.set(l.saleId, { saleId: l.saleId, symbol: l.symbol, saleDate: l.saleDate, received: l.salePrice * l.saleQuantity - l.charges, lots: [] });
+    }
+    bySale.get(l.saleId).lots.push({ invested: l.cost, purchase_date: l.purchaseDate });
+  }
+  return [...bySale.values()];
+}
+
+/** The sales the portfolio XIRR can count: made by `today`, with every purchase they used up dated. */
+export const datedSales = (sales, today) =>
+  sales.filter((s) => s.saleDate <= today && s.lots.length > 0 && s.lots.every((l) => l.purchase_date && l.invested >= 0));
 
 /**
  * Build the per-stock + portfolio report for a period.
@@ -85,8 +116,9 @@ export function xirr(lots, value) {
  * holdings: [{symbol, name, quantity, invested, purchase_date?}]
  * seriesBySymbol: Map<symbol, [{date, close}]> ascending
  * latestBySymbol: Map<symbol, price>
+ * sales: past sales, from groupSales, so the portfolio XIRR counts money taken out as well as what is still held
  */
-export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, period }) {
+export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, period, sales = [] }) {
   const rows = holdings.map((h) => {
     const series = seriesBySymbol.get(h.symbol) ?? [];
     const price =
@@ -140,7 +172,9 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
   const pnl = value - invested;
   const pnlPct = invested > 0 ? (pnl / invested) * 100 : null;
 
-  // Portfolio XIRR uses only holdings that have both a purchase date and a price; coverage says how much that is.
+  // Portfolio XIRR: money paid for every dated purchase (still held or since sold), money received from sales, and
+  // today's value of what is held. It uses holdings with every purchase dated and a price, and sales with every
+  // purchase they used up dated; coverage says how much that is.
   const flowsBySymbol = new Map();
   for (const h of holdings) {
     const lots = h.lots?.length ? h.lots : [{ invested: h.invested, purchase_date: h.purchase_date }];
@@ -151,8 +185,22 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
   const dated = rows.filter((r) => flowsBySymbol.has(r.symbol) && r.value != null);
   const datedValue = dated.reduce((s, r) => s + r.value, 0);
   const datedInvested = dated.reduce((s, r) => s + r.invested, 0);
-  const portfolioRate = xirr(dated.flatMap((r) => flowsBySymbol.get(r.symbol)), datedValue);
-  const xirrCoverage = { holdings: dated.length, of: rows.length, investedPct: invested > 0 ? (datedInvested / invested) * 100 : null };
+  const counted = datedSales(sales, today);
+  const portfolioRate = xirrFlows([
+    ...dated.flatMap((r) => flowsBySymbol.get(r.symbol)).map((f) => ({ amount: -f.invested, days: f.days })),
+    ...counted.flatMap((s) => [
+      ...s.lots.map((l) => ({ amount: -l.invested, days: daysBetween(l.purchase_date, today) })),
+      { amount: s.received, days: daysBetween(s.saleDate, today) },
+    ]),
+    { amount: datedValue, days: 0 },
+  ]);
+  const xirrCoverage = {
+    holdings: dated.length,
+    of: rows.length,
+    investedPct: invested > 0 ? (datedInvested / invested) * 100 : null,
+    sales: counted.length,
+    salesOf: sales.length,
+  };
 
   for (const r of rows) {
     r.weightPct = value > 0 && r.value != null ? (r.value / value) * 100 : null;

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReport, portfolioHistory, pctChange, referencePrice, xirr, daysBetween } from '../src/analytics.js';
+import { buildReport, portfolioHistory, pctChange, referencePrice, xirr, xirrFlows, daysBetween } from '../src/analytics.js';
+import { addDays } from '../src/dates.js';
 import { evaluateRules } from '../src/alerts.js';
 
 const TODAY = '2026-11-06';
@@ -152,6 +153,44 @@ test('buildReport: no dated holdings means no XIRR rather than a made-up number'
   });
   assert.equal(r.totals.xirrPct, null);
   assert.equal(r.totals.xirrCoverage.holdings, 0);
+});
+
+test('xirrFlows handles money taken out along the way', () => {
+  // 1000 in two years ago, 600 out a year ago, 750 worth today: 1000x^2 - 600x - 750 = 0 with x = 1 + r.
+  const x = (600 + Math.sqrt(600 ** 2 + 4 * 1000 * 750)) / 2000;
+  const r = xirrFlows([{ amount: -1000, days: 730 }, { amount: 600, days: 365 }, { amount: 750, days: 0 }]);
+  assert.ok(Math.abs(r - (x - 1)) < 1e-9, `${r} vs ${x - 1}`);
+  assert.equal(xirrFlows([{ amount: -1000, days: 365 }]), null, 'nothing came back');
+  assert.equal(xirrFlows([{ amount: 1000, days: 365 }]), null, 'nothing went in');
+  assert.equal(xirrFlows([{ amount: -1000, days: 0 }, { amount: 1100, days: 0 }]), null, 'no time has passed');
+});
+
+test('portfolio XIRR counts sales, so selling a winner no longer pulls it down', () => {
+  const d = (n) => addDays(TODAY, n);
+  // 10 shares at 100 two years ago, 10 more at 200 a year ago; the first 10 sold at 210 six months ago; 220 now.
+  const holdings = [{ symbol: 'A', name: 'A', quantity: 10, invested: 2000, lots: [{ quantity: 10, invested: 2000, purchase_date: d(-365) }] }];
+  const sales = [
+    { saleId: 1, symbol: 'A', saleDate: d(-182), received: 2100, lots: [{ invested: 1000, purchase_date: d(-730) }] },
+    { saleId: 2, symbol: 'A', saleDate: d(-100), received: 500, lots: [{ invested: 400, purchase_date: null }] }, // undated: left out
+  ];
+  const args = { holdings, seriesBySymbol: new Map([['A', []]]), latestBySymbol: new Map([['A', 220]]), today: TODAY, period: '1w' };
+  const before = buildReport(args).totals.xirrPct; // what it used to be: the shares still held only
+  const r = buildReport({ ...args, sales });
+  const expected = xirrFlows([
+    { amount: -2000, days: 365 },
+    { amount: -1000, days: 730 },
+    { amount: 2100, days: 182 },
+    { amount: 2200, days: 0 },
+  ]) * 100;
+  assert.ok(Math.abs(r.totals.xirrPct - expected) < 1e-9);
+  assert.ok(Math.abs(before - 10) < 1e-6, 'held shares alone: 2000 to 2200 in a year');
+  assert.ok(r.totals.xirrPct > before, `${r.totals.xirrPct} should beat ${before}`);
+  assert.deepEqual(r.totals.xirrCoverage, { holdings: 1, of: 1, investedPct: 100, sales: 1, salesOf: 2 });
+
+  // Everything sold: the rate still comes from the sales.
+  const sold = buildReport({ ...args, holdings: [], sales: sales.slice(0, 1) });
+  const soldExpected = xirrFlows([{ amount: -1000, days: 730 }, { amount: 2100, days: 182 }]) * 100;
+  assert.ok(Math.abs(sold.totals.xirrPct - soldExpected) < 1e-9);
 });
 
 test('portfolioHistory forward-fills and skips days before all stocks have data', () => {
