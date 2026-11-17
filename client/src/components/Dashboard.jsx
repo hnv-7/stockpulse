@@ -72,6 +72,119 @@ function PortfolioChart() {
   );
 }
 
+const ORANGE = '#d97706';
+const RANGE_LABEL = { '1m': '1 month', '3m': '3 months', '6m': '6 months', '1y': '1 year' };
+
+/** "1.25 points ahead of Nifty 50" for a difference in percentage points. */
+function versus(gap, name) {
+  if (gap == null) return '';
+  if (Math.abs(gap) < 0.005) return `Level with ${name}`;
+  return `${Math.abs(gap).toFixed(2)} points ${gap > 0 ? 'ahead of' : 'behind'} ${name}`;
+}
+
+/** Your stocks against Nifty 50: this period, since you bought (same money, same days), and over time. */
+function BenchmarkCard({ period }) {
+  const [summary, setSummary] = useState(null);
+  const [range, setRange] = useState('3m');
+  const [hist, setHist] = useState(null);
+  useEffect(() => {
+    api.benchmark(period).then(setSummary).catch(() => setSummary({ available: false, name: 'Nifty 50' }));
+  }, [period]);
+  useEffect(() => {
+    api.benchmarkHistory(range).then(setHist).catch(() => setHist({ points: [] }));
+  }, [range]);
+
+  if (!summary) return null;
+  const { name } = summary;
+  if (!summary.available) {
+    return (
+      <section className="card">
+        <h2>Compared with {name}</h2>
+        <p className="muted">{name} prices aren't available right now. They'll appear after the next price refresh.</p>
+      </section>
+    );
+  }
+
+  const p = summary.period;
+  const sp = summary.sincePurchase;
+  const points = hist?.points ?? [];
+  const last = points[points.length - 1];
+  const partial = sp && sp.coverage && sp.coverage.holdings < sp.coverage.of;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Compared with {name}</h2>
+      </div>
+      <div className="bench-grid">
+        <div className="bench-block">
+          <h3>{PERIOD_LABEL[period]}</h3>
+          <div className="bench-row"><span>Your stocks</span><strong className={tone(p.yoursPct)}>{pct(p.yoursPct)}</strong></div>
+          <div className="bench-row"><span>{name}</span><strong className={tone(p.indexPct)}>{pct(p.indexPct)}</strong></div>
+          <p className={`small ${p.yoursPct != null && p.indexPct != null ? tone(p.yoursPct - p.indexPct) : ''}`}>
+            {versus(p.yoursPct != null && p.indexPct != null ? p.yoursPct - p.indexPct : null, name)}
+          </p>
+        </div>
+        <div className="bench-block">
+          <h3>Since you bought</h3>
+          {sp ? (
+            <>
+              <div className="bench-row"><span>Your XIRR</span><strong className={tone(sp.yourXirrPct)}>{pct(sp.yourXirrPct)}</strong></div>
+              <div className="bench-row"><span>{name}, same days</span><strong className={tone(sp.indexXirrPct)}>{pct(sp.indexXirrPct)}</strong></div>
+              <p className="small">
+                {money(sp.yourValue)} now, against {money(sp.indexValue)} if the same {money(sp.invested)} had gone into {name} on the
+                days you bought.{' '}
+                <strong className={tone(sp.yourValue - sp.indexValue)}>
+                  {money(Math.abs(sp.yourValue - sp.indexValue))} {sp.yourValue >= sp.indexValue ? 'ahead' : 'behind'}
+                </strong>
+                {partial && <span className="muted"> Covers {sp.coverage.holdings} of {sp.coverage.of} holdings: the ones with every purchase dated.</span>}
+              </p>
+            </>
+          ) : (
+            <p className="muted small">Add purchase dates to your holdings to compare them with {name} bought on the same days.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="card-head bench-chart-head">
+        <h3>Your stocks vs {name}</h3>
+        <div className="seg">
+          {['1m', '3m', '6m', '1y'].map((r) => (
+            <button key={r} className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>{r.toUpperCase()}</button>
+          ))}
+        </div>
+      </div>
+      {points.length < 2 ? (
+        <p className="muted">Not enough history yet.</p>
+      ) : (
+        <>
+          <p className="small">
+            Over {RANGE_LABEL[range]}: <span className="bench-key" style={{ background: BLUE }} /> your stocks{' '}
+            <strong className={tone(last.yoursPct)}>{pct(last.yoursPct)}</strong>,{' '}
+            <span className="bench-key" style={{ background: ORANGE }} /> {name} <strong className={tone(last.indexPct)}>{pct(last.indexPct)}</strong>.
+          </p>
+          <div role="img" aria-label={`Over ${RANGE_LABEL[range]}, your stocks ${pct(last.yoursPct)} and ${name} ${pct(last.indexPct)}.`}>
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={points} margin={{ left: 8, right: 8, top: 8 }}>
+                <CartesianGrid stroke="#eef0f3" vertical={false} />
+                <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={40} fontSize={12} />
+                <YAxis domain={['auto', 'auto']} width={56} fontSize={12} tickFormatter={(v) => `${v > 0 ? '+' : ''}${Math.round(v)}%`} />
+                <ReferenceLine y={0} stroke="#9ca3af" />
+                <Tooltip formatter={(v, n) => [pct(v), n === 'yoursPct' ? 'Your stocks' : name]} labelFormatter={shortDate} />
+                <Line type="monotone" dataKey="yoursPct" stroke={BLUE} strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="indexPct" stroke={ORANGE} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+      <p className="muted small">
+        Your line counts only the shares you held through each day, so buying and selling don't show up as gains or losses.
+        Dividends aren't included on either side.
+      </p>
+    </section>
+  );
+}
+
 function ContributionChart({ rows, period }) {
   const data = rows
     .filter((r) => r.periodChangeValue != null)
@@ -271,6 +384,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
       {selectedRow && <StockDetail row={selectedRow} period={period} onClose={() => setSelected(null)} />}
       <ContributionChart rows={report.holdings} period={period} />
       <PortfolioChart />
+      <BenchmarkCard period={period} />
 
       <section className="card">
         <h2>All holdings <span className="muted">({report.holdings.length})</span></h2>

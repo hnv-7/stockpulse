@@ -135,3 +135,13 @@ tr.sell-row > td { padding: 0; }
   nav::-webkit-scrollbar { display: none; }
   .tab { white-space: nowrap; padding: 8px 10px; }
 }
+
+/* Comparison with Nifty 50 */
+.bench-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.bench-block { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.bench-block h3 { color: var(--muted); font-weight: 600; }
+.bench-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.bench-row strong { font-size: 16px; }
+.bench-block p { margin: 8px 0 0; }
+.bench-chart-head { margin-top: 4px; }
+.bench-key { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; }

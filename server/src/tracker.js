@@ -2,6 +2,8 @@ import { getQuotes, getDailyHistory, getDailyHistoryWithSplits } from './market.
 import { istDate, addDays, istDayStart } from './dates.js';
 import { evaluateRules, COOLDOWN_MS } from './alerts.js';
 import { splitMessage, RATIO_TOLERANCE } from './splits.js';
+import { BENCHMARK } from './benchmark.js';
+import { daysBetween } from './analytics.js';
 
 const log = (level, msg, extra = {}) => console.log(JSON.stringify({ level, msg, ...extra }));
 
@@ -17,11 +19,39 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
   const fetchHistory = gh ?? getDailyHistory;
   const fetchSplits = gs ?? getDailyHistoryWithSplits;
 
-  /** ~13 months of daily closes for one symbol (used when a stock is first added, and nightly). */
-  async function backfill(symbol) {
-    const points = await fetchHistory(symbol, 400);
+  /** Daily closes for one symbol, ~13 months by default (used when a stock is first added, and nightly). */
+  async function backfill(symbol, days = 400) {
+    const points = await fetchHistory(symbol, days);
     await store.saveDailyPrices(symbol, points);
     return points.length;
+  }
+
+  // The last index history fetch (per server instance): when, and from which date.
+  let indexTried = null;
+  /** A fetch that reached back at least as far is not repeated within this time (Yahoo may simply have no older data). */
+  const INDEX_RETRY_MS = 6 * 3600 * 1000;
+
+  /**
+   * Make sure the stored index closes reach back to `fromDate` and are recent. Old index closes never change, so
+   * they are fetched once and kept; the hourly poll and nightly refresh keep the recent end up to date.
+   */
+  async function ensureIndexHistory(fromDate, now = Date.now()) {
+    const today = istDate(now);
+    const bounds = await store.seriesBounds(BENCHMARK.symbol);
+    const reaches = bounds && bounds.first <= addDays(fromDate, 5);
+    const current = bounds && bounds.last >= addDays(today, -5);
+    if (reaches && current) return true;
+    // Only as far back as needed: the recent end if older closes are there, else from fromDate.
+    const from = reaches ? bounds.last : fromDate;
+    if (indexTried && now - indexTried.at < INDEX_RETRY_MS && indexTried.from <= from) return !!bounds;
+    indexTried = { at: now, from };
+    try {
+      await backfill(BENCHMARK.symbol, daysBetween(from, today) + 15);
+      return true;
+    } catch (err) {
+      log('error', 'index history fetch failed', { error: err?.message });
+      return !!bounds;
+    }
   }
 
   /**
@@ -159,10 +189,12 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
       const symbols = [...new Set(targets.map((h) => h.symbol))];
       if (!symbols.length) return { polled: 0, alerts: 0 };
 
-      const quotes = await fetchQuotes(symbols);
+      // The index rides along so comparisons with it are as fresh as the stocks.
+      const quotes = await fetchQuotes([...symbols, BENCHMARK.symbol]);
       const latest = new Map();
       const today = istDate(now);
       for (const [symbol, q] of quotes) latest.set(symbol, q.price);
+      const polled = symbols.filter((s) => latest.has(s)).length;
 
       // Splits are handled before anything compares today's price with older ones. A big jump from the last close
       // is most likely one, so such a stock is checked now even if it was already checked today.
@@ -192,8 +224,8 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
         await store.pruneNotifications(now - 180 * 86_400_000);
         await store.deleteExpiredSessions(now);
       }
-      log('info', 'poll complete', { polled: latest.size, alerts, scope: userId == null ? 'all' : 'user' });
-      return { polled: latest.size, alerts };
+      log('info', 'poll complete', { polled, alerts, scope: userId == null ? 'all' : 'user' });
+      return { polled, alerts };
     } catch (err) {
       log('error', 'poll failed', { error: err?.message });
       return { error: true };
@@ -214,6 +246,8 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
     // Catches splits on days the hourly poll didn't run. Runs first: it reads stored closes before they're replaced.
     await checkSplits(symbols, Date.now());
     let ok = 0;
+    // The index's recent closes too (older ones never change and are kept).
+    if (symbols.length) await backfill(BENCHMARK.symbol).catch((err) => log('error', 'index history refresh failed', { error: err?.message }));
     for (let i = 0; i < symbols.length; i += 5) {
       const batch = symbols.slice(i, i + 5);
       const results = await Promise.allSettled(batch.map((s) => backfill(s)));
@@ -225,5 +259,5 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
     return { symbols: symbols.length, refreshed: ok };
   }
 
-  return { backfill, checkSplits, pollOnce, refreshForUser, refreshHistory };
+  return { backfill, checkSplits, ensureIndexHistory, pollOnce, refreshForUser, refreshHistory };
 }

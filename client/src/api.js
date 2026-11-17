@@ -43,6 +43,8 @@ export const api = {
   deleteAccount: () => request('DELETE', '/me'),
   report: (period) => request('GET', `/report?period=${period}`),
   portfolioHistory: (range) => request('GET', `/portfolio/history?range=${range}`),
+  benchmark: (period) => request('GET', `/benchmark?period=${period}`),
+  benchmarkHistory: (range) => request('GET', `/benchmark/history?range=${range}`),
   stockHistory: (symbol, range) =>
     request('GET', `/stocks/${encodeURIComponent(symbol)}/history?range=${range}`),
   search: (q) => request('GET', `/search?q=${encodeURIComponent(q)}`),

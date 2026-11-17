@@ -313,10 +313,13 @@ export function createStore(db) {
         await t.query('DELETE FROM users WHERE id = $1', [id]);
         await t.query(
           `DELETE FROM daily_prices WHERE symbol NOT IN (SELECT symbol FROM holdings)
-             AND symbol NOT IN (SELECT symbol FROM watchlist) AND symbol NOT IN (SELECT symbol FROM sales)`,
+             AND symbol NOT IN (SELECT symbol FROM watchlist) AND symbol NOT IN (SELECT symbol FROM sales)
+             AND symbol NOT LIKE '^%'`,
         );
+        // Index prices ("^...") are shared by everyone and kept.
         await t.query(
-          'DELETE FROM snapshots WHERE symbol NOT IN (SELECT symbol FROM holdings) AND symbol NOT IN (SELECT symbol FROM watchlist)',
+          `DELETE FROM snapshots WHERE symbol NOT IN (SELECT symbol FROM holdings) AND symbol NOT IN (SELECT symbol FROM watchlist)
+             AND symbol NOT LIKE '^%'`,
         );
       });
     },
@@ -583,6 +586,15 @@ export function createStore(db) {
          ON CONFLICT (symbol, date) DO UPDATE SET close = EXCLUDED.close`,
         [rows.map((r) => r.symbol), rows.map((r) => r.date), rows.map((r) => r.close)],
       );
+    },
+    /** First and last stored close dates of `symbol` as {first, last}, or null when there are none. */
+    async seriesBounds(symbol) {
+      const r = await one(
+        `SELECT to_char(MIN(date), 'YYYY-MM-DD') AS first, to_char(MAX(date), 'YYYY-MM-DD') AS last
+           FROM daily_prices WHERE symbol = $1`,
+        [symbol],
+      );
+      return r?.first ? { first: r.first, last: r.last } : null;
     },
     async getSeriesMany(symbols, fromDate = '1900-01-01') {
       const out = new Map(symbols.map((s) => [s, []]));
