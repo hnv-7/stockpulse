@@ -222,6 +222,31 @@ export function buildWatchlist({ items, seriesBySymbol, latestBySymbol, today })
 }
 
 /**
+ * What was held when: one position per purchase, still held or since sold, as
+ * [{symbol, quantity, invested, from, until}]. A position is held from `from` (its purchase date; null = undated, held
+ * all along) up to but not on `until` (its sale date; null = still held). Sales before `fromDate` are left out.
+ * holdings: [{symbol, quantity, invested, purchase_date?, lots?}]; soldLots: [{symbol, quantity, invested,
+ * purchase_date, sale_date}] - the purchases each sale used up.
+ */
+export function heldPositions({ holdings, soldLots = [], fromDate }) {
+  const positions = [];
+  for (const h of holdings) {
+    const lots = h.lots?.length ? h.lots : [{ quantity: h.quantity, invested: h.invested, purchase_date: h.purchase_date }];
+    for (const l of lots) {
+      positions.push({ symbol: h.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: null });
+    }
+  }
+  for (const l of soldLots) {
+    if (l.sale_date <= fromDate) continue; // sold before the range starts: never held inside it
+    positions.push({ symbol: l.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: l.sale_date });
+  }
+  return positions;
+}
+
+/** Whether a position from heldPositions was held at the close of `date`. */
+export const activeOn = (p, date) => !((p.from && date < p.from) || (p.until && date >= p.until));
+
+/**
  * Value of what was actually held on each date, and what that cost. Returns [{date, value, invested}] for
  * dates >= fromDate.
  *
@@ -234,17 +259,7 @@ export function buildWatchlist({ items, seriesBySymbol, latestBySymbol, today })
  * seriesBySymbol: Map<symbol, [{date, close}]> ascending
  */
 export function portfolioHistory({ holdings, soldLots = [], seriesBySymbol, fromDate }) {
-  const positions = [];
-  for (const h of holdings) {
-    const lots = h.lots?.length ? h.lots : [{ quantity: h.quantity, invested: h.invested, purchase_date: h.purchase_date }];
-    for (const l of lots) {
-      positions.push({ symbol: h.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: null });
-    }
-  }
-  for (const l of soldLots) {
-    if (l.sale_date <= fromDate) continue; // sold before the range starts: never held inside it
-    positions.push({ symbol: l.symbol, quantity: l.quantity, invested: l.invested, from: l.purchase_date ?? null, until: l.sale_date });
-  }
+  const positions = heldPositions({ holdings, soldLots, fromDate });
   // A stock with no stored prices at all can't be valued on any day. Leave it out rather than blank the whole chart.
   const priced = positions.filter((p) => seriesBySymbol.get(p.symbol)?.length);
 
@@ -267,7 +282,7 @@ export function portfolioHistory({ holdings, soldLots = [], seriesBySymbol, from
     let held = 0;
     let complete = true;
     for (const p of priced) {
-      if ((p.from && date < p.from) || (p.until && date >= p.until)) continue;
+      if (!activeOn(p, date)) continue;
       held++;
       invested += p.invested;
       const c = lastClose.get(p.symbol);

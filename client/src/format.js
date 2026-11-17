@@ -7,8 +7,11 @@ export const compactMoney = (n) => (n == null ? '—' : `₹${compact.format(n)}
 export const price = (n) => (n == null ? '—' : `₹${inr2.format(n)}`);
 export const signedMoney = (n) =>
   n == null ? '—' : `${n > 0 ? '+' : n < 0 ? '−' : ''}₹${inr.format(Math.abs(Math.round(n)))}`;
-export const pct = (n) =>
-  n == null ? '—' : `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(2)}%`;
+export const pct = (n) => {
+  if (n == null) return '—';
+  const r = Math.round(n * 100) / 100; // so a tiny move shows as 0.00%, not −0.00%
+  return `${r > 0 ? '+' : r < 0 ? '−' : ''}${Math.abs(r).toFixed(2)}%`;
+};
 export const tone = (n) => (n == null || n === 0 ? '' : n > 0 ? 'pos' : 'neg');
 
 export const PERIOD_LABEL = {

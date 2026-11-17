@@ -10,6 +10,7 @@ import { previewImport } from './import-mapping.js';
 import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
 import { buildReport, buildWatchlist, portfolioHistory } from './analytics.js';
 import { suggestRatio } from './splits.js';
+import { BENCHMARK, indexChange, sameMoneyInIndex, relativePerformance } from './benchmark.js';
 import { getQuote, getCloseOn, searchSymbols } from './market.js';
 import { safeEqual } from './auth.js';
 
@@ -479,15 +480,15 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   // symbol -> when its history was last fetched for the chart because it was missing (per server instance).
   const soldBackfillTried = new Map();
 
-  api.get('/portfolio/history', async (req, res) => {
-    const userId = req.session.user.id;
-    const range = parse(z.enum(['1m', '3m', '6m', '1y']).default('3m'), req.query.range);
-    const fromDate = addDays(istDate(), -RANGE_DAYS[range]);
+  /**
+   * What a user held at any point since `fromDate` (holdings plus the purchases sales used up) and their closes from a
+   * couple of weeks before it, so the first day can carry forward a close over holidays.
+   */
+  async function loadHeld(userId, fromDate) {
     const holdings = await store.listHoldings(userId);
-    // Stocks sold inside the range were still held for part of it, so they belong on the chart up to their sale.
+    // Stocks sold inside the range were still held for part of it, so they count up to their sale.
     const soldLots = await store.listSoldLots(userId, fromDate);
     const symbols = [...new Set([...holdings, ...soldLots].map((x) => x.symbol))];
-    // A couple of weeks before the range, so the first day can carry forward a close over holidays.
     const seriesFrom = addDays(fromDate, -14);
     let seriesBySymbol = await store.getSeriesMany(symbols, seriesFrom);
 
@@ -503,7 +504,63 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       await Promise.allSettled(missing.map((s) => tracker.backfill(s)));
       seriesBySymbol = await store.getSeriesMany(symbols, seriesFrom);
     }
+    return { holdings, soldLots, seriesBySymbol };
+  }
+
+  api.get('/portfolio/history', async (req, res) => {
+    const range = parse(z.enum(['1m', '3m', '6m', '1y']).default('3m'), req.query.range);
+    const fromDate = addDays(istDate(), -RANGE_DAYS[range]);
+    const { holdings, soldLots, seriesBySymbol } = await loadHeld(req.session.user.id, fromDate);
     res.json(portfolioHistory({ holdings, soldLots, seriesBySymbol, fromDate }));
+  });
+
+  // ---------- comparison with Nifty 50 ----------
+  /** Stored index closes from `fromDate` (fetched first if they don't reach back that far), or [] if unavailable. */
+  async function indexSeriesFrom(fromDate) {
+    await tracker.ensureIndexHistory(fromDate);
+    return (await store.getSeriesMany([BENCHMARK.symbol], addDays(fromDate, -15))).get(BENCHMARK.symbol);
+  }
+
+  // Your stocks against Nifty 50: over the report period, and since you bought (the same money on the same days).
+  api.get('/benchmark', async (req, res) => {
+    const period = parse(periodSchema, req.query.period);
+    const ctx = await loadAll(req.session.user.id, period);
+    const report = buildReport(ctx);
+    const { today } = ctx;
+    // The XIRR comparison uses the holdings the portfolio XIRR uses: every purchase dated, and a price known.
+    const rows = new Map(report.holdings.map((r) => [r.symbol, r]));
+    const lotsOf = (h) => (h.lots?.length ? h.lots : [{ invested: h.invested, purchase_date: h.purchase_date }]);
+    const dated = ctx.holdings.filter((h) => lotsOf(h).every((l) => l.purchase_date) && rows.get(h.symbol)?.value != null);
+    const lots = dated.flatMap(lotsOf);
+    const earliest = lots.map((l) => l.purchase_date).sort()[0];
+    const yearAgo = addDays(today, -400);
+    const indexSeries = await indexSeriesFrom(earliest && earliest < yearAgo ? earliest : yearAgo);
+    if (!indexSeries.length) return res.json({ ...BENCHMARK, available: false });
+
+    const indexNow = indexSeries[indexSeries.length - 1].close;
+    const same = sameMoneyInIndex({ lots, indexSeries, indexNow, today });
+    res.json({
+      ...BENCHMARK,
+      available: true,
+      asOf: indexSeries[indexSeries.length - 1].date,
+      period: { period, yoursPct: report.totals.changePct, indexPct: indexChange({ indexSeries, indexNow, today, period }) },
+      sincePurchase: same && {
+        yourXirrPct: report.totals.xirrPct,
+        indexXirrPct: same.xirrPct,
+        invested: same.invested,
+        yourValue: dated.reduce((sum, h) => sum + rows.get(h.symbol).value, 0),
+        indexValue: same.value,
+        coverage: report.totals.xirrCoverage,
+      },
+    });
+  });
+
+  api.get('/benchmark/history', async (req, res) => {
+    const range = parse(z.enum(['1m', '3m', '6m', '1y']).default('3m'), req.query.range);
+    const fromDate = addDays(istDate(), -RANGE_DAYS[range]);
+    const { holdings, soldLots, seriesBySymbol } = await loadHeld(req.session.user.id, fromDate);
+    const indexSeries = await indexSeriesFrom(fromDate);
+    res.json({ ...BENCHMARK, points: relativePerformance({ holdings, soldLots, seriesBySymbol, indexSeries, fromDate }) });
   });
 
   api.get('/stocks/:symbol/history', async (req, res) => {
