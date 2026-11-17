@@ -10,6 +10,8 @@ import Account from './components/Account.jsx';
 import Login from './components/Login.jsx';
 import Brand from './components/Brand.jsx';
 
+const sessionDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+
 const TABS = [
   ['dashboard', 'Dashboard'],
   ['holdings', 'My Stocks'],
@@ -79,6 +81,11 @@ function Portfolio({ me, setMe, onSignedOut }) {
           ))}
         </nav>
         <div className="asof">
+          {report?.market?.closedToday && report.market.lastSession && (
+            <span className="market-closed" title="Prices are from the last trading session">
+              Market closed{report.market.holiday ? ' today' : ''} · last session {sessionDay(report.market.lastSession)}
+            </span>
+          )}
           <span>Updated {timeAgo(report?.asOf)}</span>
           <button onClick={refresh} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh prices'}

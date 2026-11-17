@@ -17,6 +17,7 @@ const user = (r) =>
     email: r.email,
     name: r.name,
     alertEmail: r.alert_email,
+    telegramChatId: r.telegram_chat_id ?? null,
     createdAt: n(r.created_at),
   };
 
@@ -306,6 +307,31 @@ export function createStore(db) {
     },
     async updateUserSettings(id, { alertEmail }) {
       return user(await one('UPDATE users SET alert_email = $2 WHERE id = $1 RETURNING *', [id, alertEmail]));
+    },
+    // ---------- Telegram ----------
+    /** Remember a (hashed) one-time code that links a Telegram chat to this user until `expiresAt`. */
+    async setTelegramLinkCode(id, codeHash, expiresAt) {
+      await db.query('UPDATE users SET telegram_link_code = $2, telegram_link_expires = $3 WHERE id = $1', [id, codeHash, expiresAt]);
+    },
+    /** Link the chat to whoever holds this unexpired code (used once). Returns that user, or null. */
+    async linkTelegram(codeHash, chatId, now = Date.now()) {
+      return user(
+        await one(
+          `UPDATE users SET telegram_chat_id = $2, telegram_link_code = NULL, telegram_link_expires = NULL
+            WHERE telegram_link_code = $1 AND telegram_link_expires > $3 RETURNING *`,
+          [codeHash, chatId, now],
+        ),
+      );
+    },
+    async unlinkTelegram(id) {
+      await db.query(
+        'UPDATE users SET telegram_chat_id = NULL, telegram_link_code = NULL, telegram_link_expires = NULL WHERE id = $1',
+        [id],
+      );
+    },
+    /** Forget a chat for every user it is linked to (after /stop, or when Telegram says the bot was blocked). */
+    async unlinkTelegramChat(chatId) {
+      return (await db.query('UPDATE users SET telegram_chat_id = NULL WHERE telegram_chat_id = $1', [chatId])).rowCount;
     },
     /** Deletes the user and, via ON DELETE CASCADE, all of their data. Orphaned shared prices are pruned. */
     async deleteUser(id) {
@@ -624,6 +650,58 @@ export function createStore(db) {
       );
       return r?.first ? { first: r.first, last: r.last } : null;
     },
+    // ---------- company details and dividends (shared) ----------
+    /** symbol -> {sector, industry, fetchedAt} for the symbols that have been looked up. */
+    async stockInfo(symbols) {
+      if (!symbols.length) return new Map();
+      const rows = await many('SELECT symbol, sector, industry, fetched_at FROM stock_info WHERE symbol = ANY($1::text[])', [symbols]);
+      return new Map(rows.map((r) => [r.symbol, { sector: r.sector, industry: r.industry, fetchedAt: n(r.fetched_at) }]));
+    },
+    async saveStockInfo(symbol, profile, fetchedAt) {
+      await db.query(
+        `INSERT INTO stock_info (symbol, sector, industry, fetched_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (symbol) DO UPDATE SET sector = EXCLUDED.sector, industry = EXCLUDED.industry, fetched_at = EXCLUDED.fetched_at`,
+        [symbol, profile?.sector ?? null, profile?.industry ?? null, fetchedAt],
+      );
+    },
+    async saveDividends(symbol, items) {
+      if (!items.length) return;
+      await db.query(
+        `INSERT INTO dividends (symbol, ex_date, amount)
+         SELECT $1, d, a FROM unnest($2::date[], $3::float8[]) AS t(d, a)
+         ON CONFLICT (symbol, ex_date) DO UPDATE SET amount = EXCLUDED.amount`,
+        [symbol, items.map((d) => d.date), items.map((d) => d.amount)],
+      );
+    },
+    /** symbol -> [{date, amount}] oldest first. */
+    async dividendsFor(symbols) {
+      const out = new Map(symbols.map((s) => [s, []]));
+      if (!symbols.length) return out;
+      const rows = await many(
+        `SELECT symbol, to_char(ex_date, 'YYYY-MM-DD') AS date, amount FROM dividends
+          WHERE symbol = ANY($1::text[]) ORDER BY symbol, ex_date`,
+        [symbols],
+      );
+      for (const r of rows) out.get(r.symbol).push({ date: r.date, amount: n(r.amount) });
+      return out;
+    },
+    /** symbol -> {from, checkedAt}: how far back its dividends have been fetched, and when. */
+    async dividendChecks(symbols) {
+      if (!symbols.length) return new Map();
+      const rows = await many(
+        `SELECT symbol, to_char(from_date, 'YYYY-MM-DD') AS from_date, checked_at FROM dividend_checks WHERE symbol = ANY($1::text[])`,
+        [symbols],
+      );
+      return new Map(rows.map((r) => [r.symbol, { from: r.from_date, checkedAt: n(r.checked_at) }]));
+    },
+    async markDividendsChecked(symbol, fromDate, at) {
+      await db.query(
+        `INSERT INTO dividend_checks (symbol, from_date, checked_at) VALUES ($1, $2::date, $3)
+         ON CONFLICT (symbol) DO UPDATE SET from_date = LEAST(dividend_checks.from_date, EXCLUDED.from_date), checked_at = EXCLUDED.checked_at`,
+        [symbol, fromDate, at],
+      );
+    },
+
     async getSeriesMany(symbols, fromDate = '1900-01-01') {
       const out = new Map(symbols.map((s) => [s, []]));
       if (!symbols.length) return out;

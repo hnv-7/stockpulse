@@ -4,7 +4,7 @@ import { rateLimit } from 'express-rate-limit';
 import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { istDate, addDays, isStale } from './dates.js';
+import { istDate, addDays, isStale, marketStatus } from './dates.js';
 import { toCsv, importHoldings, isPastOrToday, MAX_IMPORT_ROWS } from './portfolio-io.js';
 import { previewImport } from './import-mapping.js';
 import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
@@ -12,8 +12,10 @@ import { buildReport, buildWatchlist, portfolioHistory, groupSales, datedSales }
 import { suggestRatio } from './splits.js';
 import { BENCHMARK, indexChange, sameMoneyInIndex, relativePerformance } from './benchmark.js';
 import { capitalGains, openPositions, fyOf, TAX_RULES } from './capital-gains.js';
-import { getQuote, getCloseOn, searchSymbols } from './market.js';
-import { safeEqual } from './auth.js';
+import { allocation, dividendStart, dividendsReceived } from './income.js';
+import { getQuote, getCloseOn, searchSymbols, getProfile, getDividends } from './market.js';
+import { safeEqual, sha256 } from './auth.js';
+import { randomBytes } from 'node:crypto';
 
 const periodSchema = z.enum(['1d', '1w', '1m', '3m', '1y']).default('1w');
 const symbolSchema = z
@@ -83,6 +85,14 @@ const RANGE_DAYS = { '1m': 30, '3m': 90, '6m': 182, '1y': 365 };
 const SOLD_BACKFILL_PER_REQUEST = 5;
 /** ...and a symbol is not retried more often than this (a delisted or merged stock may never come back). */
 const SOLD_BACKFILL_RETRY_MS = 6 * 3600 * 1000;
+/** Company sectors are looked up again after this long... */
+const SECTOR_REFRESH_MS = 90 * 86_400_000;
+/** ...and a symbol's dividends after this long, so new ones show up within a week. */
+const DIVIDEND_REFRESH_MS = 7 * 86_400_000;
+/** Yahoo lookups (sectors, dividends) per request, so a big portfolio fills in over a few page loads. */
+const LOOKUPS_PER_REQUEST = 5;
+/** How long a "connect Telegram" link works. */
+const TELEGRAM_LINK_MS = 15 * 60_000;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -115,6 +125,8 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   const lookupQuote = deps.getQuote ?? getQuote;
   const lookupCloseOn = deps.getCloseOn ?? getCloseOn;
   const search = deps.searchSymbols ?? searchSymbols;
+  const lookupProfile = deps.getProfile ?? getProfile;
+  const lookupDividends = deps.getDividends ?? getDividends;
   const app = express();
   app.disable('x-powered-by');
   // Behind Vercel's proxy the client IP is in X-Forwarded-For; trust exactly one hop when deployed over HTTPS.
@@ -150,6 +162,38 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   api.all('/cron/poll', cronOnly, async (_req, res) => res.json(await tracker.pollOnce()));
   api.all('/cron/history', cronOnly, async (_req, res) => res.json(await tracker.refreshHistory()));
 
+  // ---------- Telegram webhook (called by Telegram, which sends back the secret set with setWebhook) ----------
+  // "/start <code>" from the link in the Account tab connects the chat; "/stop" disconnects it. Always answers 200,
+  // since Telegram keeps retrying anything else.
+  api.post('/telegram/webhook', limiter(60_000, 120), async (req, res) => {
+    if (!config.telegram.enabled) return res.status(404).json({ error: 'not found' });
+    const secret = req.headers['x-telegram-bot-api-secret-token'];
+    if (typeof secret !== 'string' || !safeEqual(secret, config.telegram.webhookSecret)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const msg = req.body?.message;
+    const chatId = msg?.chat?.id;
+    if (chatId == null || msg.chat.type !== 'private') return res.json({ ok: true });
+    const chat = String(chatId);
+    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+    const reply = (t) => notifier.sendTelegram(chat, t);
+    const start = /^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{8,64})$/.exec(text);
+    if (start) {
+      const linked = await store.linkTelegram(sha256(start[1]), chat);
+      await reply(
+        linked
+          ? 'Connected. Your Stock Beat alerts will arrive here. Send /stop to turn them off.'
+          : 'That link has expired or was already used. In Stock Beat, open Account and connect Telegram again.',
+      );
+    } else if (/^\/stop\b/.test(text)) {
+      const n = await store.unlinkTelegramChat(chat);
+      await reply(n ? "Stopped. Stock Beat won't send alerts here any more." : "This chat isn't connected to Stock Beat.");
+    } else if (/^\/start\b/.test(text)) {
+      await reply('To connect, open Stock Beat, go to Account and choose Connect Telegram.');
+    }
+    res.json({ ok: true });
+  });
+
   // ---------- auth ----------
   const authLimiter = limiter(15 * 60_000, 30);
   api.get('/auth/login', authLimiter, (req, res) => auth.login(req, res));
@@ -161,11 +205,12 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const base = {
       authConfigured: !!(config.google.clientId && config.google.clientSecret),
       emailAvailable: notifier.emailEnabled,
+      telegramAvailable: config.telegram.enabled,
     };
     if (!req.session) return res.json({ user: null, ...base });
     const { user, csrfToken } = req.session;
     res.json({
-      user: { email: user.email, name: user.name, alertEmail: user.alertEmail },
+      user: { email: user.email, name: user.name, alertEmail: user.alertEmail, telegramConnected: !!user.telegramChatId },
       csrfToken,
       ...base,
     });
@@ -180,7 +225,32 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const { alertEmail } = parse(settingsSchema, req.body);
     if (alertEmail && !notifier.emailEnabled) throw new HttpError(400, 'email alerts are not enabled on this server');
     const u = await store.updateUserSettings(req.session.user.id, { alertEmail });
-    res.json({ email: u.email, name: u.name, alertEmail: u.alertEmail });
+    res.json({ email: u.email, name: u.name, alertEmail: u.alertEmail, telegramConnected: !!u.telegramChatId });
+  });
+
+  // Connect Telegram: a one-time link that opens the bot with "/start <code>"; the webhook does the rest.
+  api.post('/me/telegram/link', limiter(60_000, 10), async (req, res) => {
+    if (!config.telegram.enabled) throw new HttpError(404, 'Telegram alerts are not set up on this server');
+    const code = randomBytes(12).toString('base64url');
+    const expiresAt = Date.now() + TELEGRAM_LINK_MS;
+    await store.setTelegramLinkCode(req.session.user.id, sha256(code), expiresAt);
+    res.json({ url: `https://t.me/${config.telegram.botUsername}?start=${code}`, expiresAt });
+  });
+
+  api.post('/me/telegram/test', limiter(60_000, 5), async (req, res) => {
+    const user = await store.getUser(req.session.user.id);
+    if (!user?.telegramChatId) throw new HttpError(400, 'Telegram is not connected');
+    const r = await notifier.sendTelegram(user.telegramChatId, 'Test from Stock Beat: your alerts will arrive here.');
+    if (!r.ok) {
+      if (r.blocked) await store.unlinkTelegram(user.id);
+      throw new HttpError(502, r.blocked ? 'Telegram says the bot was blocked; connect it again' : "Telegram didn't accept the message; try again later");
+    }
+    res.status(204).end();
+  });
+
+  api.delete('/me/telegram', async (req, res) => {
+    await store.unlinkTelegram(req.session.user.id);
+    res.status(204).end();
   });
 
   api.delete('/me', async (req, res) => {
@@ -477,7 +547,9 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       const priceAsOf = fetchedAt.get(r.symbol) ?? null;
       return { ...r, priceAsOf, stale: r.price != null && isStale(priceAsOf, now), splitPending: splitPending.has(r.symbol) };
     });
-    res.json({ ...report, holdings: rows, asOf, pendingSplits, realised: await store.salesTotals(req.session.user.id) });
+    // Whether NSE is trading, from the latest day Nifty 50 has a price.
+    const market = marketStatus((await store.seriesBounds(BENCHMARK.symbol))?.last, now);
+    res.json({ ...report, holdings: rows, asOf, pendingSplits, market, realised: await store.salesTotals(req.session.user.id) });
   });
 
   // symbol -> when its history was last fetched for the chart because it was missing (per server instance).
@@ -534,6 +606,62 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
       open = openPositions({ holdings: ctx.holdings, latestBySymbol: ctx.latestBySymbol, today });
     }
     res.json({ ...result, years, current: fy === current, open, rules: TAX_RULES });
+  });
+
+  // ---------- sectors and concentration ----------
+  api.get('/allocation', async (req, res) => {
+    const ctx = await loadAll(req.session.user.id, '1d');
+    const report = buildReport(ctx);
+    const symbols = ctx.holdings.map((h) => h.symbol);
+    const now = Date.now();
+    let info = await store.stockInfo(symbols);
+    const due = symbols.filter((s) => !info.has(s) || now - info.get(s).fetchedAt > SECTOR_REFRESH_MS).slice(0, LOOKUPS_PER_REQUEST);
+    if (due.length) {
+      // A failed lookup isn't saved, so it is tried again next time; "Yahoo has no sector" is saved and kept.
+      await Promise.allSettled(due.map(async (s) => store.saveStockInfo(s, await lookupProfile(s), now)));
+      info = await store.stockInfo(symbols);
+    }
+    res.json(allocation(report.holdings, info));
+  });
+
+  // ---------- dividends ----------
+  // symbol -> when a dividend lookup last failed (per server instance), so it isn't retried on every page load.
+  const dividendFailedAt = new Map();
+
+  api.get('/dividends', async (req, res) => {
+    const userId = req.session.user.id;
+    const holdings = await store.listHoldings(userId);
+    const saleLots = await store.listSaleLotsForGains(userId);
+    const start = dividendStart({ holdings, saleLots });
+    const symbols = [...start.keys()];
+    const now = Date.now();
+    const checks = await store.dividendChecks(symbols);
+    const due = symbols
+      .filter((s) => {
+        const c = checks.get(s);
+        const stale = !c || c.from > start.get(s) || now - c.checkedAt > DIVIDEND_REFRESH_MS;
+        return stale && now - (dividendFailedAt.get(s) ?? 0) > SOLD_BACKFILL_RETRY_MS;
+      })
+      .slice(0, LOOKUPS_PER_REQUEST);
+    await Promise.allSettled(
+      due.map(async (s) => {
+        const c = checks.get(s);
+        const from = addDays(c && c.from < start.get(s) ? c.from : start.get(s), -5);
+        try {
+          await store.saveDividends(s, await lookupDividends(s, from));
+          await store.markDividendsChecked(s, from, now);
+        } catch (err) {
+          dividendFailedAt.set(s, now);
+          throw err;
+        }
+      }),
+    );
+    const dividendsBySymbol = await store.dividendsFor(symbols);
+    res.json({
+      ...dividendsReceived({ holdings, saleLots, dividendsBySymbol, today: istDate() }),
+      // Stocks whose dividends haven't been fetched yet (more are fetched on each load).
+      pending: symbols.length - (await store.dividendChecks(symbols)).size,
+    });
   });
 
   // ---------- comparison with Nifty 50 ----------

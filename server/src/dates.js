@@ -54,6 +54,20 @@ function lastSessionOpen(ts) {
 }
 
 /**
+ * NSE's state for the header. `lastSession` is the latest trading day with a price (YYYY-MM-DD).
+ * A weekday that is well into trading hours with no price for today yet means the market is shut for a holiday;
+ * the check waits until 11:00 so one late or failed hourly poll isn't mistaken for a holiday.
+ */
+export function marketStatus(lastSession, now = Date.now()) {
+  const { minutes, day } = istParts(now);
+  const today = istDate(now);
+  const weekday = day !== 0 && day !== 6;
+  const holiday = weekday && minutes >= 11 * 60 && lastSession != null && lastSession < today;
+  const open = weekday && !holiday && minutes >= OPEN_MIN && minutes <= CLOSE_MIN;
+  return { open, closedToday: !weekday || holiday, holiday, lastSession: lastSession ?? null };
+}
+
+/**
  * Is a price taken at `asOf` too old to trust as "now"?
  * In trading hours it must be under two hours old. Outside them the last session's price is expected,
  * so it only counts as stale when it predates that session's open (a whole session was missed).

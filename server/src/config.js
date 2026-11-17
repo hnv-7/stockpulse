@@ -22,6 +22,15 @@ export function getConfig(env = process.env) {
       clientId: env.GOOGLE_CLIENT_ID || '',
       clientSecret: env.GOOGLE_CLIENT_SECRET || '',
     },
+    // Telegram alerts: a bot from @BotFather, and a secret Telegram sends back with every webhook call.
+    telegram: {
+      botToken: env.TELEGRAM_BOT_TOKEN || '',
+      botUsername: (env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, ''),
+      webhookSecret: env.TELEGRAM_WEBHOOK_SECRET || '',
+      get enabled() {
+        return !!(this.botToken && this.botUsername && this.webhookSecret);
+      },
+    },
     smtp: {
       host: env.SMTP_HOST || '',
       port: int(env.SMTP_PORT, 587),

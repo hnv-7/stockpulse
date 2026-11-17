@@ -206,6 +206,37 @@ test('older purchases fetch older index history once; undated holdings skip the 
   }
 });
 
+test('the summary and the chart asked for at the same moment both get the index history', async () => {
+  // The dashboard asks for both at once. On a fresh database the first starts fetching the index history and the
+  // second used to answer straight away with only today's price, so the chart said "not enough history".
+  let holdIndex = false;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const m = market();
+  const deps = {
+    ...m.deps,
+    getDailyHistory: async (symbol, days) => {
+      if (symbol === BENCHMARK.symbol && holdIndex) await gate;
+      return m.deps.getDailyHistory(symbol, days);
+    },
+  };
+  const t = await setup({ prices: { 'AAA.NS': 100, [BENCHMARK.symbol]: 22220 }, deps });
+  try {
+    const u = await t.login('a@example.test');
+    await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 10, invested: 1500, purchaseDate: d(-40) });
+    await poll(t); // stores today's Nifty price only
+    holdIndex = true; // the index history fetch now waits until both requests are in
+    const both = Promise.all([u.call('GET', '/api/benchmark?period=1w'), u.call('GET', '/api/benchmark/history?range=1m')]);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    const [summary, history] = await both;
+    assert.notEqual(summary.body.sincePurchase, null);
+    assert.equal(history.body.points.length, 3, 'd(-8), d(-1) and today');
+  } finally {
+    await t.close();
+  }
+});
+
 test('without any index prices the comparison says so', async () => {
   const t = await setup({
     deps: {
