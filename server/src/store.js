@@ -506,6 +506,34 @@ export function createStore(db) {
         sale_date: r.sale_date,
       }));
     },
+    /**
+     * Every purchase the user's sales used up, with its sale: one row per purchase per sale, for capital gains.
+     * A sale with no recorded purchases counts as one undated purchase of everything it sold.
+     */
+    async listSaleLotsForGains(userId) {
+      const rows = await many(
+        `SELECT s.id AS sale_id, s.symbol, s.name, to_char(s.sale_date, 'YYYY-MM-DD') AS sale_date, s.sale_price,
+                s.quantity AS sale_quantity, s.charges,
+                COALESCE(sl.quantity, s.quantity) AS quantity, COALESCE(sl.invested, s.cost_basis) AS cost,
+                to_char(sl.purchase_date, 'YYYY-MM-DD') AS purchase_date
+           FROM sales s LEFT JOIN sale_lots sl ON sl.sale_id = s.id
+          WHERE s.user_id = $1
+          ORDER BY s.sale_date DESC, s.id DESC, sl.id`,
+        [userId],
+      );
+      return rows.map((r) => ({
+        saleId: n(r.sale_id),
+        symbol: r.symbol,
+        name: r.name,
+        saleDate: r.sale_date,
+        salePrice: n(r.sale_price),
+        saleQuantity: n(r.sale_quantity),
+        charges: n(r.charges),
+        quantity: n(r.quantity),
+        cost: n(r.cost),
+        purchaseDate: r.purchase_date ?? null,
+      }));
+    },
     /** Totals over every sale the user has made. */
     async salesTotals(userId) {
       const r = await one(

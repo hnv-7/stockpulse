@@ -44,6 +44,7 @@ export const api = {
   report: (period) => request('GET', `/report?period=${period}`),
   portfolioHistory: (range) => request('GET', `/portfolio/history?range=${range}`),
   benchmark: (period) => request('GET', `/benchmark?period=${period}`),
+  capitalGains: (fy) => request('GET', `/capital-gains${fy ? `?fy=${fy}` : ''}`),
   benchmarkHistory: (range) => request('GET', `/benchmark/history?range=${range}`),
   stockHistory: (symbol, range) =>
     request('GET', `/stocks/${encodeURIComponent(symbol)}/history?range=${range}`),

@@ -11,6 +11,7 @@ import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
 import { buildReport, buildWatchlist, portfolioHistory } from './analytics.js';
 import { suggestRatio } from './splits.js';
 import { BENCHMARK, indexChange, sameMoneyInIndex, relativePerformance } from './benchmark.js';
+import { capitalGains, openPositions, fyOf, TAX_RULES } from './capital-gains.js';
 import { getQuote, getCloseOn, searchSymbols } from './market.js';
 import { safeEqual } from './auth.js';
 
@@ -512,6 +513,25 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     const fromDate = addDays(istDate(), -RANGE_DAYS[range]);
     const { holdings, soldLots, seriesBySymbol } = await loadHeld(req.session.user.id, fromDate);
     res.json(portfolioHistory({ holdings, soldLots, seriesBySymbol, fromDate }));
+  });
+
+  // ---------- capital gains ----------
+  // Realised gains for a financial year split into short- and long-term, an estimate of the tax, and (for the current
+  // year) what is still held: unrealised gains by term and purchases about to turn long-term.
+  api.get('/capital-gains', async (req, res) => {
+    const userId = req.session.user.id;
+    const today = istDate();
+    const current = fyOf(today);
+    const fy = parse(z.coerce.number().int().min(2000).max(current).default(current), req.query.fy);
+    const lots = await store.listSaleLotsForGains(userId);
+    const years = [...new Set([current, ...lots.map((l) => fyOf(l.saleDate))])].sort((a, b) => b - a);
+    const result = capitalGains({ lots, fy });
+    let open = null;
+    if (fy === current) {
+      const ctx = await loadAll(userId, '1d');
+      open = openPositions({ holdings: ctx.holdings, latestBySymbol: ctx.latestBySymbol, today });
+    }
+    res.json({ ...result, years, current: fy === current, open, rules: TAX_RULES });
   });
 
   // ---------- comparison with Nifty 50 ----------
