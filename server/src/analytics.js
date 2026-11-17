@@ -191,6 +191,37 @@ export function buildReport({ holdings, seriesBySymbol, latestBySymbol, today, p
 }
 
 /**
+ * Watchlist rows: the price, its move over a day / week / month, distance from the 52-week high, and the move since
+ * the stock was added. items: [{id, symbol, name, note, added_price, created_at}]; the maps are as in buildReport.
+ */
+export function buildWatchlist({ items, seriesBySymbol, latestBySymbol, today }) {
+  return items.map((w) => {
+    const series = seriesBySymbol.get(w.symbol) ?? [];
+    const price = latestBySymbol.get(w.symbol) ?? (series.length ? series[series.length - 1].close : null);
+    const change = (period) => {
+      const ref = price == null ? null : referencePrice(series, today, period);
+      return ref ? pctChange(price, ref.close) : null;
+    };
+    const hi = price == null ? null : high52(series, today, price);
+    return {
+      id: w.id,
+      symbol: w.symbol,
+      name: w.name,
+      note: w.note,
+      addedAt: w.created_at,
+      addedPrice: w.added_price,
+      price,
+      dayChangePct: change('1d'),
+      weekChangePct: change('1w'),
+      monthChangePct: change('1m'),
+      high52: hi,
+      fromHighPct: hi && price != null ? pctChange(price, hi) : null,
+      sinceAddedPct: pctChange(price, w.added_price),
+    };
+  });
+}
+
+/**
  * Value of what was actually held on each date, and what that cost. Returns [{date, value, invested}] for
  * dates >= fromDate.
  *

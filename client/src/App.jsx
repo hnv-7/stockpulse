@@ -3,6 +3,7 @@ import { api, setCsrfToken } from './api.js';
 import { timeAgo } from './format.js';
 import Dashboard from './components/Dashboard.jsx';
 import Holdings from './components/Holdings.jsx';
+import Watchlist from './components/Watchlist.jsx';
 import Alerts from './components/Alerts.jsx';
 import Account from './components/Account.jsx';
 import Login from './components/Login.jsx';
@@ -11,6 +12,7 @@ import Brand from './components/Brand.jsx';
 const TABS = [
   ['dashboard', 'Dashboard'],
   ['holdings', 'My Stocks'],
+  ['watchlist', 'Watchlist'],
   ['alerts', 'Alerts'],
   ['account', 'Account'],
 ];
@@ -89,6 +91,7 @@ function Portfolio({ me, setMe, onSignedOut }) {
           <Dashboard report={report} period={period} setPeriod={setPeriod} goToStocks={() => setTab('holdings')} />
         )}
         {tab === 'holdings' && <Holdings onChange={load} />}
+        {tab === 'watchlist' && <Watchlist onChange={load} />}
         {tab === 'alerts' && <Alerts onRead={load} />}
         {tab === 'account' && (
           <Account

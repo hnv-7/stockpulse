@@ -8,7 +8,7 @@ import { istDate, addDays, isStale } from './dates.js';
 import { toCsv, importHoldings, isPastOrToday, MAX_IMPORT_ROWS } from './portfolio-io.js';
 import { previewImport } from './import-mapping.js';
 import { ImportError, MAX_FILE_BYTES } from './import-formats.js';
-import { buildReport, portfolioHistory } from './analytics.js';
+import { buildReport, buildWatchlist, portfolioHistory } from './analytics.js';
 import { suggestRatio } from './splits.js';
 import { getQuote, getCloseOn, searchSymbols } from './market.js';
 import { safeEqual } from './auth.js';
@@ -65,6 +65,9 @@ const ruleUpdateSchema = z.object({
   enabled: z.boolean(),
 });
 const settingsSchema = z.object({ alertEmail: z.boolean() });
+const noteSchema = z.string().trim().max(200, 'keep the note under 200 characters');
+const watchSchema = z.object({ symbol: symbolSchema, note: noteSchema.default('') });
+const watchUpdateSchema = z.object({ note: noteSchema });
 // Every `denominator` shares became `numerator` (a 1:1 bonus is 2 for 1).
 const splitRatioSchema = z
   .object({
@@ -356,6 +359,68 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     res.json({ totals: await store.salesTotals(userId), items: await store.listSales(userId) });
   });
 
+  // ---------- watchlist ----------
+  // Stocks a user follows without holding them. Prices are polled like held stocks', and alerts can be set on them.
+  api.get('/watchlist', async (req, res) => {
+    const userId = req.session.user.id;
+    const items = await store.listWatchlist(userId);
+    const symbols = items.map((w) => w.symbol);
+    const today = istDate();
+    const seriesBySymbol = await store.getSeriesMany(symbols, addDays(today, -400));
+    const latestBySymbol = new Map();
+    for (const [symbol, s] of seriesBySymbol) if (s.length) latestBySymbol.set(symbol, s[s.length - 1].close);
+    const fetchedAt = await store.lastSnapshotTsBySymbol(symbols);
+    const held = new Set((await store.listHoldings(userId)).map((h) => h.symbol));
+    const rules = await store.listRules(userId);
+    const splitPending = new Set((await store.pendingSplits(userId)).map((p) => p.symbol));
+    const now = Date.now();
+    res.json(
+      buildWatchlist({ items, seriesBySymbol, latestBySymbol, today }).map((r) => {
+        const priceAsOf = fetchedAt.get(r.symbol) ?? null;
+        return {
+          ...r,
+          priceAsOf,
+          stale: r.price != null && isStale(priceAsOf, now),
+          held: held.has(r.symbol),
+          splitPending: splitPending.has(r.symbol),
+          targets: rules
+            .filter((x) => x.kind === 'price' && x.symbol === r.symbol)
+            .map((x) => ({ id: x.id, direction: x.direction, targetPrice: x.target_price, enabled: x.enabled })),
+        };
+      }),
+    );
+  });
+
+  api.post('/watchlist', limiter(60_000, 30), async (req, res) => {
+    const userId = req.session.user.id;
+    const { symbol, note } = parse(watchSchema, req.body);
+    if ((await store.countWatchlist(userId)) >= config.maxWatchlistPerUser) {
+      throw new HttpError(400, `you can watch up to ${config.maxWatchlistPerUser} stocks`);
+    }
+    if (await store.isWatched(userId, symbol)) throw new HttpError(409, `${symbol} is already on your watchlist`);
+    const quote = await lookupQuote(symbol).catch(() => null);
+    if (!quote) throw new HttpError(404, 'symbol not found (use NSE/BSE format, e.g. INFY.NS)');
+    const item = await store.addWatch(userId, { symbol, name: quote.name, note, addedPrice: quote.price });
+    if (!item) throw new HttpError(409, `${symbol} is already on your watchlist`);
+    // History is shared, so only fetch it if nobody holds or watches this symbol yet.
+    const have = (await store.getSeriesMany([symbol], addDays(istDate(), -60))).get(symbol);
+    if (have.length < 20) await tracker.backfill(symbol).catch(() => 0);
+    await store.saveSnapshots([{ symbol, ts: Date.now(), price: quote.price }]);
+    res.status(201).json(item);
+  });
+
+  api.put('/watchlist/:id', async (req, res) => {
+    const { note } = parse(watchUpdateSchema, req.body);
+    const updated = await store.updateWatchNote(req.session.user.id, parseId(req.params.id), note);
+    if (!updated) throw new HttpError(404, 'not found');
+    res.json(updated);
+  });
+
+  api.delete('/watchlist/:id', async (req, res) => {
+    if (!(await store.removeWatch(req.session.user.id, parseId(req.params.id)))) throw new HttpError(404, 'not found');
+    res.status(204).end();
+  });
+
   // ---------- splits and bonus issues ----------
   // Found by the poller; a user's shares only change when they confirm (with a ratio they can correct).
   api.get('/splits', async (req, res) => {
@@ -442,11 +507,12 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   });
 
   api.get('/stocks/:symbol/history', async (req, res) => {
+    const userId = req.session.user.id;
     const symbol = parse(symbolSchema, req.params.symbol);
-    const holding = (await store.listHoldings(req.session.user.id)).find((h) => h.symbol === symbol);
-    if (!holding) throw new HttpError(404, 'not found');
+    const holding = (await store.listHoldings(userId)).find((h) => h.symbol === symbol);
+    if (!holding && !(await store.isWatched(userId, symbol))) throw new HttpError(404, 'not found');
     const range = parse(z.enum(['1d', '1m', '3m', '6m', '1y']).default('3m'), req.query.range);
-    const avgCost = holding.invested / holding.quantity;
+    const avgCost = holding ? holding.invested / holding.quantity : null;
     if (range === '1d') {
       return res.json({ symbol, avgCost, points: await store.getSnapshots(symbol, Date.now() - 3 * 86_400_000) });
     }
@@ -464,8 +530,8 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     if ((await store.countRules(userId)) >= config.maxRulesPerUser) {
       throw new HttpError(400, `you can have up to ${config.maxRulesPerUser} alerts`);
     }
-    if (symbol && !(await store.listHoldings(userId)).some((h) => h.symbol === symbol)) {
-      throw new HttpError(404, 'stock not in portfolio');
+    if (symbol && !(await store.listHoldings(userId)).some((h) => h.symbol === symbol) && !(await store.isWatched(userId, symbol))) {
+      throw new HttpError(404, 'stock not in your portfolio or watchlist');
     }
     const fields =
       body.kind === 'price'

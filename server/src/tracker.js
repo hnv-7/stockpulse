@@ -149,7 +149,14 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
   async function pollOnce({ now = Date.now(), userId = null } = {}) {
     try {
       const holdings = (await store.listAllHoldings()).filter((h) => userId == null || h.userId === userId);
-      const symbols = [...new Set(holdings.map((h) => h.symbol))];
+      const watched = (await store.listAllWatchlist()).filter((w) => userId == null || w.userId === userId);
+      // Alerts look at what each user holds, plus what they only watch (which "any stock" rules leave out).
+      const heldBy = new Set(holdings.map((h) => `${h.userId}|${h.symbol}`));
+      const targets = [
+        ...holdings,
+        ...watched.filter((w) => !heldBy.has(`${w.userId}|${w.symbol}`)).map((w) => ({ ...w, watchOnly: true })),
+      ];
+      const symbols = [...new Set(targets.map((h) => h.symbol))];
       if (!symbols.length) return { polled: 0, alerts: 0 };
 
       const quotes = await fetchQuotes(symbols);
@@ -178,7 +185,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
       const rules = (await store.listEnabledRules())
         .filter((r) => userId == null || r.user_id === userId)
         .filter((r) => !(r.kind === 'price' && pending.has(`${r.user_id}|${r.symbol}`)));
-      const alerts = await runAlerts({ holdings: holdings.filter((h) => !unsettled.has(h.symbol)), rules, latest, now });
+      const alerts = await runAlerts({ holdings: targets.filter((h) => !unsettled.has(h.symbol)), rules, latest, now });
 
       if (userId == null) {
         await store.pruneSnapshots(now - 60 * 86_400_000);
@@ -195,7 +202,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
 
   /** Manual "refresh prices" from a signed-in user, throttled so it can't hammer the price source. */
   async function refreshForUser(userId, now = Date.now()) {
-    const symbols = (await store.listHoldings(userId)).map((h) => h.symbol);
+    const symbols = [...(await store.listHoldings(userId)), ...(await store.listWatchlist(userId))].map((x) => x.symbol);
     const last = await store.lastSnapshotTs(symbols);
     if (last != null && now - last < MANUAL_REFRESH_MIN_MS) return { throttled: true, polled: 0, alerts: 0 };
     return pollOnce({ now, userId });

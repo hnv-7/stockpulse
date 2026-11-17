@@ -232,7 +232,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
       {pendingSplits.length > 0 && (
         <div className="warn box split-notice" role="status">
           {pendingSplits.map((p) => p.symbol).join(', ')} had a split or bonus issue. Until you confirm{' '}
-          {pendingSplits.length === 1 ? 'it, its' : 'them, their'} value here is off.{' '}
+          {pendingSplits.length === 1 ? 'it' : 'them'}, your figures for {pendingSplits.length === 1 ? 'it are' : 'them are'} in the old shares.{' '}
           <button onClick={goToStocks}>Review on Holdings</button>
         </div>
       )}
