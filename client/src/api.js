@@ -51,6 +51,8 @@ export const api = {
   allocation: () => request('GET', '/allocation'),
   dividends: () => request('GET', '/dividends'),
   benchmarkHistory: (range) => request('GET', `/benchmark/history?range=${range}`),
+  markets: () => request('GET', '/markets'),
+  marketSector: (key) => request('GET', `/markets/sectors/${encodeURIComponent(key)}`),
   stockHistory: (symbol, range) =>
     request('GET', `/stocks/${encodeURIComponent(symbol)}/history?range=${range}`),
   search: (q) => request('GET', `/search?q=${encodeURIComponent(q)}`),

@@ -128,7 +128,7 @@ tr.sell-row > td { padding: 0; }
 .watch-targets { list-style: none; margin: 0; padding: 0; white-space: nowrap; }
 .watch-targets li + li { margin-top: 2px; }
 
-/* Narrow screens: five tabs don't fit, so the tab strip scrolls sideways on its own instead of widening the page. */
+/* Narrow screens: the tabs don't fit, so the tab strip scrolls sideways on its own instead of widening the page. */
 @media (max-width: 600px) {
   .topbar { gap: 8px 16px; }
   nav { flex-basis: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; }
@@ -179,3 +179,30 @@ tr.sell-row > td { padding: 0; }
 .telegram { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .telegram h3 { margin: 0; }
 .telegram p { margin: 0; }
+
+/* Markets: indices, sector heatmap, popular stocks */
+.mk-indices { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 4px 0 14px; }
+.mk-index { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mk-index-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.mk-index-row strong { font-size: 16px; }
+.mk-index .spark { width: 100%; }
+.spark { display: block; overflow: visible; }
+.spark-empty { display: inline-block; }
+.mk-breadth { display: flex; flex-direction: column; gap: 6px; }
+.mk-breadth-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #eef0f3; }
+.mk-breadth-bar .up { background: var(--pos); }
+.mk-breadth-bar .flat { background: #9ca3af; }
+.mk-breadth-bar .down { background: var(--neg); }
+.mk-summary { margin: 0 0 12px; }
+.mk-sectors { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.mk-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; min-width: 0; }
+.mk-tile:hover:not(:disabled) { background: #f3f4f6; filter: brightness(0.97); }
+.mk-tile.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mk-tile .spark { width: 100%; margin: 2px 0; }
+.mk-tile-name { font-weight: 600; overflow-wrap: anywhere; }
+.mk-tile-pct { font-size: 18px; font-weight: 600; }
+.mk-tag { display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 10px; font-size: 11px; background: #e8effd; color: #1d4ed8; white-space: nowrap; }
+.mk-table td { vertical-align: middle; }
+.mk-table .spark { display: inline-block; }
+.mk-movers .insight-list li { align-items: baseline; }
+.mk-foot { margin: 0 4px; }

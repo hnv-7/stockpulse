@@ -69,6 +69,30 @@ export async function getQuotes(symbols) {
 }
 
 /**
+ * Latest quotes for many symbols in one request, as a Map. Symbols Yahoo doesn't know are simply left out.
+ * Fields are checked here rather than by the library, so one odd quote can't fail the whole batch.
+ */
+export async function getQuoteBatch(symbols) {
+  const list = await withRetry(() => yf.quote(symbols, { return: 'array' }, { validateResult: false }));
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const out = new Map();
+  for (const q of Array.isArray(list) ? list : []) {
+    if (num(q?.regularMarketPrice) == null) continue;
+    const t = q.regularMarketTime;
+    out.set(q.symbol, {
+      symbol: q.symbol,
+      price: q.regularMarketPrice,
+      prevClose: num(q.regularMarketPreviousClose),
+      high52: num(q.fiftyTwoWeekHigh),
+      name: q.longName || q.shortName || q.symbol,
+      // When that price traded: on a holiday or weekend it is the last session's.
+      marketTime: t instanceof Date ? t.getTime() : typeof t === 'number' ? t * 1000 : null,
+    });
+  }
+  return out;
+}
+
+/**
  * Splits from a chart response, as [{date, numerator, denominator}] with IST dates: on `date` every `denominator`
  * shares became `numerator`. Yahoo records NSE/BSE bonus issues as splits too (a 1:1 bonus is "2:1").
  */
