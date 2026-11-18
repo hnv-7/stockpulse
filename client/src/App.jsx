@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, setCsrfToken } from './api.js';
 import { timeAgo } from './format.js';
 import Dashboard from './components/Dashboard.jsx';
+import Markets from './components/Markets.jsx';
 import Holdings from './components/Holdings.jsx';
 import Watchlist from './components/Watchlist.jsx';
 import CapitalGains from './components/CapitalGains.jsx';
@@ -14,6 +15,7 @@ const sessionDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', 
 
 const TABS = [
   ['dashboard', 'Dashboard'],
+  ['markets', 'Markets'],
   ['holdings', 'My Stocks'],
   ['watchlist', 'Watchlist'],
   ['gains', 'Capital gains'],
@@ -99,6 +101,7 @@ function Portfolio({ me, setMe, onSignedOut }) {
         {tab === 'dashboard' && (
           <Dashboard report={report} period={period} setPeriod={setPeriod} goToStocks={() => setTab('holdings')} />
         )}
+        {tab === 'markets' && <Markets />}
         {tab === 'holdings' && <Holdings onChange={load} />}
         {tab === 'watchlist' && <Watchlist onChange={load} />}
         {tab === 'gains' && <CapitalGains />}

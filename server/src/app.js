@@ -14,6 +14,7 @@ import { BENCHMARK, indexChange, sameMoneyInIndex, relativePerformance } from '.
 import { capitalGains, openPositions, fyOf, TAX_RULES } from './capital-gains.js';
 import { allocation, dividendStart, dividendsReceived } from './income.js';
 import { getQuote, getCloseOn, searchSymbols, getProfile, getDividends } from './market.js';
+import { createMarkets } from './markets.js';
 import { safeEqual, sha256 } from './auth.js';
 import { randomBytes } from 'node:crypto';
 
@@ -127,6 +128,7 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
   const search = deps.searchSymbols ?? searchSymbols;
   const lookupProfile = deps.getProfile ?? getProfile;
   const lookupDividends = deps.getDividends ?? getDividends;
+  const markets = createMarkets({ quoteBatch: deps.getQuoteBatch, dailyHistory: deps.getMarketHistory });
   const app = express();
   app.disable('x-powered-by');
   // Behind Vercel's proxy the client IP is in X-Forwarded-For; trust exactly one hop when deployed over HTTPS.
@@ -729,6 +731,32 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     }
     const series = (await store.getSeriesMany([symbol], addDays(istDate(), -RANGE_DAYS[range]))).get(symbol);
     res.json({ symbol, avgCost, points: series.map((p) => ({ date: p.date, price: p.close })) });
+  });
+
+  // ---------- markets: indices, sectors and their popular stocks ----------
+  // The same for everyone and cached in `markets`; only the "you hold" / "watching" marks are per user.
+  const MARKETS_DOWN = "Market data isn't available right now. Please try again in a few minutes.";
+  async function marksFor(userId) {
+    const [holdings, watched] = await Promise.all([store.listHoldings(userId), store.listWatchlist(userId)]);
+    const held = new Set(holdings.map((h) => h.symbol));
+    const watching = new Set(watched.map((w) => w.symbol));
+    return (r) => ({ ...r, held: held.has(r.symbol), watching: watching.has(r.symbol) });
+  }
+
+  api.get('/markets', async (req, res) => {
+    const data = await markets.overview().catch(() => null);
+    if (!data) throw new HttpError(503, MARKETS_DOWN);
+    const mark = await marksFor(req.session.user.id);
+    res.json({ ...data, movers: { gainers: data.movers.gainers.map(mark), losers: data.movers.losers.map(mark) } });
+  });
+
+  api.get('/markets/sectors/:key', async (req, res) => {
+    const key = parse(z.string().regex(/^[a-z-]{1,30}$/, 'invalid sector'), req.params.key);
+    const data = await markets.sector(key).catch(() => null);
+    if (data === undefined) throw new HttpError(404, 'not found');
+    if (!data) throw new HttpError(503, MARKETS_DOWN);
+    const mark = await marksFor(req.session.user.id);
+    res.json({ ...data, stocks: data.stocks.map(mark) });
   });
 
   // ---------- alert rules ----------
