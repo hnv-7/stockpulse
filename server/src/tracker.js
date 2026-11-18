@@ -35,7 +35,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
 
   /**
    * Make sure the stored index closes reach back to `fromDate` and are recent. Old index closes never change, so
-   * they are fetched once and kept; the hourly poll and nightly refresh keep the recent end up to date.
+   * they are fetched once and kept; the scheduled price refreshes and nightly history job keep the recent end up to date.
    */
   async function ensureIndexHistory(fromDate, now = Date.now()) {
     while (indexFetch) await indexFetch.catch(() => {});
@@ -262,7 +262,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
   /** Replace provisional closes with official ones. Bounded concurrency keeps it inside serverless time limits. */
   async function refreshHistory() {
     const symbols = await store.allSymbols();
-    // Catches splits on days the hourly poll didn't run. Runs first: it reads stored closes before they're replaced.
+    // Catches splits on days no price refresh ran. Runs first: it reads stored closes before they're replaced.
     await checkSplits(symbols, Date.now());
     let ok = 0;
     // The index's recent closes too (older ones never change and are kept).
