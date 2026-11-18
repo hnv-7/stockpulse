@@ -151,7 +151,7 @@ export function createApp({ store, tracker, auth, config, notifier, deps = {} })
     next();
   });
 
-  // ---------- scheduled jobs (called by GitHub Actions / Vercel Cron with a shared secret) ----------
+  // ---------- scheduled jobs (called by Vercel Cron with a shared secret; see the crons in vercel.json) ----------
   const cronOnly = (req, res, next) => {
     if (!config.cronSecret) return res.status(503).json({ error: 'scheduler is not configured' });
     const header = req.headers.authorization || '';

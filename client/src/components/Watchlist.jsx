@@ -182,7 +182,7 @@ function WatchChart({ row, onClose }) {
         <div className="seg">
           {['1d', '1m', '3m', '6m', '1y'].map((r) => (
             <button key={r} className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>
-              {r === '1d' ? 'Hourly' : r.toUpperCase()}
+              {r === '1d' ? 'Intraday' : r.toUpperCase()}
             </button>
           ))}
           <button onClick={onClose}>Close</button>
@@ -193,7 +193,7 @@ function WatchChart({ row, onClose }) {
         {live.length > 0 && ` Alert levels: ${live.map((t) => `${t.direction} ${price(t.targetPrice)}`).join(', ')} (green above, red below).`}
       </p>
       {points.length < 2 ? (
-        <p className="muted">{intraday ? 'Hourly points build up while the server runs during market hours.' : 'Not enough history yet.'}</p>
+        <p className="muted">{intraday ? 'Intraday points build up from the price refreshes at about 9:30, 12:30 and 15:30 IST.' : 'Not enough history yet.'}</p>
       ) : (
         <div role="img" aria-label={`${row.symbol} price from ${price(points[0].price)} to ${price(points[points.length - 1].price)}.`}>
           <ResponsiveContainer width="100%" height={240}>

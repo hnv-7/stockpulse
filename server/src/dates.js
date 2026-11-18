@@ -25,10 +25,17 @@ export function isRealDate(s) {
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
+const DAY_MS = 86_400_000;
 const OPEN_MIN = 9 * 60 + 15; // NSE opens 09:15 IST
 const CLOSE_MIN = 15 * 60 + 30; // and closes 15:30 IST
-/** During trading hours a price older than this is flagged. Hourly polling can run late, so allow a margin. */
-export const STALE_IN_SESSION_MS = 2 * 3600 * 1000;
+
+/**
+ * When prices are refreshed on weekdays, in IST minutes since midnight: after the open, midday, and at the close.
+ * These are the /api/cron/poll crons in vercel.json (04:00, 07:00 and 10:00 UTC); a test keeps the two in step.
+ */
+export const REFRESH_TIMES = [9 * 60 + 30, 12 * 60 + 30, 15 * 60 + 30];
+/** Vercel's free plan runs a daily cron at any minute of its hour, so a refresh can land up to this long after its time. */
+export const REFRESH_WINDOW_MS = 75 * 60_000;
 
 /** The instant (ms) a YYYY-MM-DD day starts in IST. */
 export function istDayStart(date) {
@@ -41,22 +48,29 @@ function istParts(ts) {
   return { minutes: d.getUTCHours() * 60 + d.getUTCMinutes(), day: d.getUTCDay() };
 }
 
-/** The most recent weekday 09:15 IST at or before `ts` (market holidays are not known, so they count as sessions). */
-function lastSessionOpen(ts) {
-  let t = ts;
-  for (let i = 0; i < 8; i++) {
-    const { minutes, day } = istParts(t);
-    if (day !== 0 && day !== 6 && minutes >= OPEN_MIN) return t - (minutes - OPEN_MIN) * 60_000 - (t % 60_000);
-    // step back to the end of the previous IST day
-    t -= (minutes + 1) * 60_000;
+/**
+ * The scheduled time (ms) of the latest refresh that should have run by `ts`, allowing for its window.
+ * Weekdays only; market holidays are not known, and the crons run on them too.
+ */
+export function lastDueRefresh(ts) {
+  const due = ts - REFRESH_WINDOW_MS;
+  const dayStart = istDayStart(istDate(due));
+  for (let back = 0; back < 8; back++) {
+    const start = dayStart - back * DAY_MS;
+    const { day } = istParts(start);
+    if (day === 0 || day === 6) continue;
+    for (const min of [...REFRESH_TIMES].reverse()) {
+      const at = start + min * 60_000;
+      if (at <= due) return at;
+    }
   }
-  return ts;
+  return due;
 }
 
 /**
  * NSE's state for the header. `lastSession` is the latest trading day with a price (YYYY-MM-DD).
  * A weekday that is well into trading hours with no price for today yet means the market is shut for a holiday;
- * the check waits until 11:00 so one late or failed hourly poll isn't mistaken for a holiday.
+ * the check waits until 11:00, after the open refresh's window (09:30-10:45), so a late refresh isn't mistaken for one.
  */
 export function marketStatus(lastSession, now = Date.now()) {
   const { minutes, day } = istParts(now);
@@ -68,15 +82,11 @@ export function marketStatus(lastSession, now = Date.now()) {
 }
 
 /**
- * Is a price taken at `asOf` too old to trust as "now"?
- * In trading hours it must be under two hours old. Outside them the last session's price is expected,
- * so it only counts as stale when it predates that session's open (a whole session was missed).
- * `asOf` null or missing counts as stale.
+ * Is a price taken at `asOf` too old to trust as "now"? It is when a scheduled refresh has had its whole window
+ * since then (it was missed or failed). So between refreshes, at night and over weekends, the latest refresh's
+ * price is current. `asOf` null or missing counts as stale.
  */
 export function isStale(asOf, now = Date.now()) {
   if (asOf == null) return true;
-  const { minutes, day } = istParts(now);
-  const inSession = day !== 0 && day !== 6 && minutes >= OPEN_MIN && minutes <= CLOSE_MIN;
-  if (inSession) return now - asOf > STALE_IN_SESSION_MS;
-  return asOf < lastSessionOpen(now);
+  return asOf < lastDueRefresh(now);
 }

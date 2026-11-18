@@ -351,7 +351,7 @@ function StockDetail({ row, period, onClose }) {
         <div className="seg">
           {['1d', '1m', '3m', '6m', '1y'].map((r) => (
             <button key={r} className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>
-              {r === '1d' ? 'Hourly' : r.toUpperCase()}
+              {r === '1d' ? 'Intraday' : r.toUpperCase()}
             </button>
           ))}
           <button onClick={onClose}>Close</button>
@@ -361,7 +361,7 @@ function StockDetail({ row, period, onClose }) {
         Your average cost is {price(row.avgCost)} (dashed line). {PERIOD_LABEL[period]}: {pct(row.periodChangePct)} vs {PERIOD_VS[period]}.
       </p>
       {points.length < 2 ? (
-        <p className="muted">{intraday ? 'Hourly points build up while the server runs during market hours.' : 'Not enough history yet.'}</p>
+        <p className="muted">{intraday ? 'Intraday points build up from the price refreshes at about 9:30, 12:30 and 15:30 IST.' : 'Not enough history yet.'}</p>
       ) : (
         <div role="img" aria-label={`${row.symbol} price from ${price(points[0].price)} to ${price(points[points.length - 1].price)}. Your average cost is ${price(row.avgCost)}.`}>
         <ResponsiveContainer width="100%" height={240}>

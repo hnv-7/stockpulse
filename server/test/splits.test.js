@@ -84,7 +84,7 @@ async function enteredEarlier(t, userId) {
   }
 }
 
-/** The last price fetched the day before the split, in the old shares (what the hourly poll would have stored). */
+/** The last price fetched the day before the split, in the old shares (what a price refresh would have stored). */
 const lastPriceYesterday = (t, symbol, price) =>
   t.store.saveSnapshots([{ symbol, ts: istDayStart(d(-1)) + 15.75 * 3600_000, price }]);
 

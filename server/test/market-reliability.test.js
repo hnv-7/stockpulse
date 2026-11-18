@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { withRetry, createTtlCache } from '../src/market.js';
-import { isStale, STALE_IN_SESSION_MS } from '../src/dates.js';
+import { readFileSync } from 'node:fs';
+import { isStale, lastDueRefresh, REFRESH_TIMES } from '../src/dates.js';
 
 const noSleep = async () => {};
 const ist = (s) => Date.parse(`${s}+05:30`);
@@ -73,20 +74,45 @@ test('the cache drops its oldest entry when full', async () => {
   assert.equal(await cached('a', load), 4, 'a was evicted and loaded again');
 });
 
-test('a price is stale after two hours in trading hours, and never fresh when unknown', () => {
-  const now = ist('2026-11-13T12:00:00'); // Friday, market open
-  assert.equal(isStale(now - STALE_IN_SESSION_MS + 60_000, now), false);
-  assert.equal(isStale(now - STALE_IN_SESSION_MS - 60_000, now), true);
+// 2026-11-13 is a Friday, 2026-11-16 a Monday.
+test('a price is current until a scheduled refresh has had its whole window, and never when unknown', () => {
+  const now = ist('2026-11-13T12:00:00'); // the 09:30 refresh is due by 10:45, the 12:30 one not yet
+  assert.equal(isStale(ist('2026-11-13T09:41:00'), now), false, 'from the open refresh');
+  assert.equal(isStale(ist('2026-11-12T15:50:00'), now), true, 'the open refresh was missed');
+  assert.equal(isStale(ist('2026-11-12T15:50:00'), ist('2026-11-13T10:30:00')), false, 'open refresh still within its hour');
+  assert.equal(isStale(ist('2026-11-13T09:41:00'), ist('2026-11-13T13:40:00')), false, 'midday refresh still within its hour');
+  assert.equal(isStale(ist('2026-11-13T09:41:00'), ist('2026-11-13T13:50:00')), true, 'the midday refresh was missed');
   assert.equal(isStale(null, now), true);
 });
 
-test('outside trading hours the last session price is not stale', () => {
-  assert.equal(isStale(ist('2026-11-13T15:00:00'), ist('2026-11-13T20:00:00')), false, 'Friday evening');
-  assert.equal(isStale(ist('2026-11-13T15:00:00'), ist('2026-11-15T10:00:00')), false, 'Sunday, Friday price');
-  assert.equal(isStale(ist('2026-11-13T15:00:00'), ist('2026-11-16T08:00:00')), false, 'Monday before the open');
+test('between the close refresh and the next open, the close price is current', () => {
+  const close = ist('2026-11-13T15:50:00');
+  assert.equal(isStale(close, ist('2026-11-13T20:00:00')), false, 'Friday evening');
+  assert.equal(isStale(close, ist('2026-11-15T10:00:00')), false, 'Sunday');
+  assert.equal(isStale(close, ist('2026-11-16T09:20:00')), false, 'Monday at the open');
+  assert.equal(isStale(close, ist('2026-11-16T10:40:00')), false, 'Monday, open refresh still within its hour');
 });
 
-test('a whole missed session makes the price stale', () => {
-  assert.equal(isStale(ist('2026-11-12T15:00:00'), ist('2026-11-15T10:00:00')), true, 'Thursday price on Sunday');
-  assert.equal(isStale(ist('2026-11-13T15:00:00'), ist('2026-11-16T10:00:00')), true, 'Friday price on Monday in session');
+test('a missed refresh makes the price stale, even out of hours', () => {
+  assert.equal(isStale(ist('2026-11-13T13:00:00'), ist('2026-11-13T20:00:00')), true, 'Friday close refresh missed');
+  assert.equal(isStale(ist('2026-11-12T15:50:00'), ist('2026-11-15T10:00:00')), true, 'Thursday price on Sunday');
+  assert.equal(isStale(ist('2026-11-13T15:50:00'), ist('2026-11-16T11:00:00')), true, 'Friday price late on Monday morning');
+});
+
+test('lastDueRefresh steps back over the weekend to Friday\'s close refresh', () => {
+  assert.equal(lastDueRefresh(ist('2026-11-16T08:00:00')), ist('2026-11-13T15:30:00'));
+  assert.equal(lastDueRefresh(ist('2026-11-16T10:45:00')), ist('2026-11-16T09:30:00'));
+});
+
+test('the poll crons in vercel.json run at the refresh times, once each weekday', () => {
+  const vercel = JSON.parse(readFileSync(new URL('../../vercel.json', import.meta.url), 'utf8'));
+  const polls = vercel.crons.filter((c) => c.path === '/api/cron/poll');
+  const istMinutes = polls.map((c) => {
+    const [min, hour, dom, mon, dow] = c.schedule.split(' ');
+    assert.deepEqual([dom, mon, dow], ['*', '*', '1-5'], c.schedule);
+    return (Number(hour) * 60 + Number(min) + 330) % 1440; // UTC to IST
+  });
+  assert.deepEqual(istMinutes.sort((a, b) => a - b), REFRESH_TIMES);
+  // Vercel's free plan fires anywhere in the hour, so the open refresh must not be able to run before 09:15.
+  assert.ok(REFRESH_TIMES[0] >= 9 * 60 + 15);
 });

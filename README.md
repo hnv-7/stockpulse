@@ -4,7 +4,7 @@ Track your Indian (NSE/BSE) stock portfolio, see which stocks are dragging it do
 opportunities, and get alerted when a stock falls by a percentage you choose.
 
 Each person signs in with Google and enters their own holdings once (quantity + total invested).
-Prices are fetched automatically on a schedule, so history keeps building even when nobody opens the app.
+Prices are refreshed automatically on weekdays after the market opens, at midday and at the close (about 09:30, 12:30 and 15:30 IST), so history keeps building even when nobody opens the app.
 
 ## What you get
 
@@ -33,8 +33,8 @@ Prices are fetched automatically on a schedule, so history keeps building even w
 | Web app + API | Vercel project with two [services](https://vercel.com/docs/services): `client` (Vite/React) and `server` (Express) | no always-on server, nothing binds to `0.0.0.0` |
 | Database | Neon (hosted Postgres) | free tier is enough |
 | Sign-in | Google OpenID Connect (PKCE, state, nonce) | sessions are random tokens, stored hashed |
-| Hourly price polling | GitHub Actions schedule → `GET /api/cron/poll` | Vercel's free plan only allows daily cron |
-| Daily history catch-up | Vercel Cron → `GET /api/cron/history` | |
+| Price refreshes (open, midday, close) | Vercel Cron → `GET /api/cron/poll` | three daily jobs, 09:30, 12:30 and 15:30 IST on weekdays |
+| Daily history catch-up | Vercel Cron → `GET /api/cron/history` | 19:00 IST on weekdays |
 
 Both cron endpoints require `Authorization: Bearer <CRON_SECRET>`.
 
@@ -55,21 +55,24 @@ You need free accounts on GitHub, Neon, Google Cloud and Vercel.
      curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook?url=$APP_BASE_URL/api/telegram/webhook&secret_token=$TELEGRAM_WEBHOOK_SECRET&allowed_updates=%5B%22message%22%5D"
      ```
 4. **Google sign-in**: in Google Cloud Console → APIs & Services → Credentials, create an *OAuth client ID* of type *Web application*. Add the authorised redirect URI `https://<your-domain>/api/auth/callback`. Configure the OAuth consent screen (set it to *External*; add test users while it's in Testing mode, or publish it so anyone can sign in).
-5. **Hourly polling**: in the GitHub repo → Settings → Secrets and variables → Actions, add `APP_URL` (e.g. `https://your-app.vercel.app`) and `CRON_SECRET` (same value as in Vercel). The workflow in [`.github/workflows/poll.yml`](.github/workflows/poll.yml) then runs hourly during market hours (IST) on weekdays. Use *Run workflow* once to test it. If the repo sits inside a larger repo, move the workflow file to the repo's root `.github/workflows/`.
+5. **Scheduled refreshes**: nothing to set up beyond `CRON_SECRET`. The `crons` in [`vercel.json`](vercel.json) refresh prices on weekdays after the open, at midday and at the close, and Vercel sends `CRON_SECRET` with each call. Cron jobs run only on the production deployment; check them under the project's *Schedules → Cron Jobs* tab. To test one without waiting, call it yourself:
+   ```bash
+   curl -H "Authorization: Bearer $CRON_SECRET" "$APP_BASE_URL/api/cron/poll"
+   ```
 
 ### Limits to know about
 
-- GitHub Actions schedules can start several minutes late, and are paused after 60 days of repository inactivity.
-- Vercel Hobby cron runs once a day with up to ±59 minutes of timing slack. That is why hourly polling uses GitHub Actions.
+- Vercel's free (Hobby) plan runs each cron once a day, at any minute within its hour, so the refreshes land at 09:30-10:29, 12:30-13:29 and 15:30-16:29 IST. Delivery is best effort and a missed run is not retried; a price then shows as *Stale* until the next refresh or a *Refresh prices* click. On the Pro plan you can schedule them to the minute, or add more.
+- The close refresh can run while Yahoo's quote still lags the market by a few minutes. The 19:00 IST history job replaces each day's close with the official one.
 - Prices come from Yahoo Finance's unofficial API. They are typically delayed ~15 minutes and could change or be rate-limited without notice.
-- Hourly points exist only for hours the poll actually ran. Daily closes are back-filled, so daily/weekly/monthly reports have no gaps.
+- The *Intraday* chart has a point only for each refresh that ran (three a day, plus any *Refresh prices* clicks). Daily closes are back-filled, so daily/weekly/monthly reports have no gaps.
 - Statement import: files up to 2 MB, 500 rows, and 30 PDF pages. PDFs are read by text position, so they work for text-based statements but not scanned images or password-protected files; Excel/CSV is the most reliable. Old `.xls` files must be saved as `.xlsx` first. Brokers change their layouts now and then, so check the preview, especially stocks marked "matched by company name".
-- Splits come from Yahoo, which records bonus issues as splits and sometimes gets combined actions wrong (it reported Bajaj Finance's June 2025 4:1 bonus plus 1:2 split as "2:1"). Stock Beat compares the reported ratio with how far the price actually moved and, when they disagree, suggests the price-based ratio and warns you to check it with your broker. Each stock is checked at the first poll of the day and again straight after any move of more than 8%. If Yahoo publishes a split late, a small bonus (say 1:10) can still set off a drop alert before it is found.
+- Splits come from Yahoo, which records bonus issues as splits and sometimes gets combined actions wrong (it reported Bajaj Finance's June 2025 4:1 bonus plus 1:2 split as "2:1"). Stock Beat compares the reported ratio with how far the price actually moved and, when they disagree, suggests the price-based ratio and warns you to check it with your broker. Each stock is checked at the first refresh of the day and again straight after any move of more than 8%. If Yahoo publishes a split late, a small bonus (say 1:10) can still set off a drop alert before it is found.
 - Which of your entries a split changes is decided by when you entered them: anything entered before the ex-date is taken to be in the old shares, and anything entered later in the new ones. If you have already corrected a quantity yourself, choose "Already done / not needed".
 - Nifty 50 (`^NSEI`) is a price index, so neither side of the comparison includes dividends. The since-you-bought comparison covers the same holdings and sales as the portfolio XIRR: those with every purchase dated. Index closes are stored once and kept; older ones are fetched the first time someone's purchases go back further.
 - The capital gains tax figure is an estimate for listed shares where STT was paid (20% short-term, 12.5% long-term above ₹1.25 lakh a year since 23 July 2024; 15% and 10% above ₹1 lakh before). It leaves out surcharge, rebates, unused basic exemption, and grandfathering of shares bought before 1 Feb 2018. Bonus shares carry the original purchase date and spread cost (for tax they count from allotment at zero cost). The rules live in `TAX_RULES` in [`server/src/capital-gains.js`](server/src/capital-gains.js); add a row when a budget changes them.
 - Sectors come from Yahoo and are missing for some smaller companies ("Sector not known"); each stock is looked up once and again every 90 days. Dividends are Yahoo's per-share amounts by ex-date, before tax deducted at source; purchases without a date count from the day they were entered in the app, and sold purchases without a date aren't counted. Dividends aren't part of XIRR or the Nifty 50 comparison, which are price-only. Up to 5 stocks are looked up per page load, so a large portfolio fills in over a few loads.
-- "Market closed today" for a holiday appears only after 11:00 IST, so one late hourly poll isn't mistaken for a holiday.
+- "Market closed today" for a holiday appears only after 11:00 IST, once the open refresh's hour has passed, so a late refresh isn't mistaken for a holiday. If the open refresh is missed altogether, a normal trading day can show as closed until the midday refresh.
 - This is a tracking tool, not investment advice.
 
 ### Not yet verified on a real deployment
@@ -107,7 +110,7 @@ npm install && npm run build
 npm start          # binds to 127.0.0.1:4000; put a TLS reverse proxy in front
 ```
 
-Call `/api/cron/poll` hourly (e.g. with `curl -H "Authorization: Bearer $CRON_SECRET" …`) from cron or a systemd timer.
+Call `/api/cron/poll` at 09:30, 12:30 and 15:30 IST on weekdays (or more often), and `/api/cron/history` once each evening, e.g. with `curl -H "Authorization: Bearer $CRON_SECRET" …` from cron or a systemd timer.
 
 ## Tests
 
