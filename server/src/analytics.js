@@ -111,6 +111,34 @@ export const datedSales = (sales, today) =>
   sales.filter((s) => s.saleDate <= today && s.lots.length > 0 && s.lots.every((l) => l.purchase_date && l.invested >= 0));
 
 /**
+ * One holding per symbol, for views across several portfolios: a stock held in two portfolios becomes one holding with
+ * every purchase of both (oldest first, undated last), the summed quantity and amount, and the earliest dated purchase.
+ * `portfolioIds` lists where it is held. Holdings of a symbol held once are returned as they are.
+ */
+export function mergeBySymbol(holdings) {
+  const groups = new Map();
+  for (const h of holdings) {
+    if (!groups.has(h.symbol)) groups.set(h.symbol, []);
+    groups.get(h.symbol).push(h);
+  }
+  const byDate = (a, b) =>
+    a.purchase_date === b.purchase_date ? 0 : a.purchase_date == null ? 1 : b.purchase_date == null ? -1 : a.purchase_date < b.purchase_date ? -1 : 1;
+  return [...groups.values()].map((hs) => {
+    if (hs.length === 1) return { ...hs[0], portfolioIds: [hs[0].portfolioId] };
+    const dates = hs.map((h) => h.purchase_date).filter(Boolean).sort();
+    return {
+      ...hs[0],
+      quantity: Math.round(hs.reduce((s, h) => s + h.quantity, 0) * 10_000) / 10_000,
+      invested: Math.round(hs.reduce((s, h) => s + h.invested, 0) * 100) / 100,
+      purchase_date: dates[0] ?? null,
+      created_at: Math.min(...hs.map((h) => h.created_at ?? Infinity)),
+      lots: hs.flatMap((h) => h.lots ?? []).sort(byDate),
+      portfolioIds: hs.map((h) => h.portfolioId),
+    };
+  });
+}
+
+/**
  * Build the per-stock + portfolio report for a period.
  *
  * holdings: [{symbol, name, quantity, invested, purchase_date?}]

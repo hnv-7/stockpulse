@@ -164,7 +164,7 @@ const ISIN = /^IN[A-Z0-9]{10}$/;
  *  3. otherwise the ISIN, then the company name, are searched (NSE listing preferred).
  * Rows matched by name are flagged so the user can double-check them in the preview.
  */
-export async function resolveSymbols(rows, { lookupQuote, search, concurrency = 4 }) {
+export async function resolveSymbols(rows, { lookupQuote, search, fundByIsin = null, concurrency = 4 }) {
   const cache = new Map();
   let lookups = 0;
 
@@ -196,13 +196,18 @@ export async function resolveSymbols(rows, { lookupQuote, search, concurrency = 
             if (q) return { symbol: nse, name: q.name, match: 'isin' };
             return { symbol: hits[0].symbol, name: hits[0].name, match: 'isin' };
           }
+          // Mutual fund ISINs start INF; AMFI's list maps them to scheme codes.
+          if (fundByIsin && r.isin.startsWith('INF')) {
+            const fund = await fundByIsin(r.isin).catch(() => null);
+            if (fund) return { symbol: fund.symbol, name: fund.name, match: 'isin' };
+          }
         }
         if (r.name) {
           const hits = await search(r.name);
           const pick = hits.find((h) => h.exchange === 'NSE') ?? hits[0];
           if (pick) return { symbol: pick.symbol, name: pick.name, match: 'name', note: 'matched by company name - please check' };
         }
-        return { error: `could not match "${r.name || raw || r.isin}" to an NSE/BSE symbol` };
+        return { error: `could not match "${r.name || raw || r.isin}" to an NSE/BSE symbol or mutual fund` };
       } catch {
         return { error: 'the price source did not respond - try again in a minute' };
       }
@@ -240,12 +245,13 @@ export function mergeBySymbol(items) {
 
 /**
  * Read an uploaded statement and describe what importing it would do, without changing anything.
- * existing: the user's current holdings. Returns { format, items, errors }.
+ * existing: the user's current holdings in the portfolio being imported into; heldCount: how many holdings they have in
+ * all portfolios (the cap counts every one). Returns { format, items, errors }.
  */
-export async function previewImport({ buf, existing, lookupQuote, search, maxHoldings }) {
+export async function previewImport({ buf, existing, heldCount = existing.length, lookupQuote, search, fundByIsin = null, maxHoldings }) {
   const { format, tables } = await readTables(buf);
   const { rows, errors } = extractHoldings(tables);
-  const resolved = await resolveSymbols(rows, { lookupQuote, search });
+  const resolved = await resolveSymbols(rows, { lookupQuote, search, fundByIsin });
 
   const matched = [];
   rows.forEach((r, i) => {
@@ -259,7 +265,7 @@ export async function previewImport({ buf, existing, lookupQuote, search, maxHol
   });
 
   const have = new Map(existing.map((h) => [h.symbol, h]));
-  let count = have.size;
+  let count = heldCount;
   const items = [];
   for (const it of mergeBySymbol(matched)) {
     const cur = have.get(it.symbol);

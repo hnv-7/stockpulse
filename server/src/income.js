@@ -34,6 +34,29 @@ export function allocation(rows, infoBySymbol) {
   return { total, sectors, top, topPct: sum(top, (t) => t.weightPct) };
 }
 
+/** The name a sector goes by in targets; holdings Yahoo has no sector for are grouped under this. */
+export const UNKNOWN_SECTOR = 'Sector not known';
+
+/**
+ * How far each sector is from its target share, and what it would take to get there: amount > 0 means buy that much,
+ * < 0 sell. Rebalancing only makes sense once the targets add up to 100%, which `complete` says.
+ * alloc: from allocation(); targets: [{sector, pct}].
+ */
+export function rebalance(alloc, targets) {
+  const total = alloc.total;
+  const targetTotal = sum(targets, (t) => t.pct);
+  const target = new Map(targets.map((t) => [t.sector, t.pct]));
+  const now = new Map(alloc.sectors.map((s) => [s.sector ?? UNKNOWN_SECTOR, s.value]));
+  const rows = [...new Set([...now.keys(), ...target.keys()])].map((sector) => {
+    const value = now.get(sector) ?? 0;
+    const weightPct = total > 0 ? (value / total) * 100 : 0;
+    const targetPct = target.get(sector) ?? 0;
+    return { sector, value, weightPct, targetPct, driftPct: weightPct - targetPct, amount: (targetPct / 100) * total - value };
+  });
+  rows.sort((a, b) => b.targetPct - a.targetPct || b.value - a.value);
+  return { complete: Math.abs(targetTotal - 100) < 0.01, targetTotal, rows };
+}
+
 /**
  * The earliest day each stock's dividends matter from: its first dated purchase (held or sold), or for an undated
  * purchase the day it was entered in the app. Returns Map(symbol -> YYYY-MM-DD).

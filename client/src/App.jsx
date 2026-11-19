@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, setCsrfToken } from './api.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, setCsrfToken, setScope } from './api.js';
 import { timeAgo } from './format.js';
+import { readPref, writePref } from './prefs.js';
 import Dashboard from './components/Dashboard.jsx';
 import Markets from './components/Markets.jsx';
 import Holdings from './components/Holdings.jsx';
@@ -22,14 +23,56 @@ const TABS = [
   ['alerts', 'Alerts'],
   ['account', 'Account'],
 ];
+const TAB_IDS = new Set(TABS.map(([id]) => id));
+/** How often the open dashboard reloads its figures (paused while the tab is hidden). */
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
+/** The tab named in the address (#/holdings), so reloading, bookmarks and the Back button work. */
+const tabFromHash = () => {
+  const id = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
+  return TAB_IDS.has(id) ? id : 'dashboard';
+};
+
+function useHashTab() {
+  const [tab, setTabState] = useState(tabFromHash);
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  const setTab = useCallback((id) => {
+    if (`#/${id}` !== window.location.hash) window.location.hash = `/${id}`;
+    setTabState(id);
+  }, []);
+  return [tab, setTab];
+}
+
+function PortfolioPicker({ portfolios, scope, onChange }) {
+  if (portfolios.length < 2) return null;
+  return (
+    <label className="picker">
+      <span className="sr-only">Portfolio</span>
+      <select value={scope} onChange={(e) => onChange(e.target.value)}>
+        <option value="all">All portfolios</option>
+        {portfolios.map((p) => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+      </select>
+    </label>
+  );
+}
 
 function Portfolio({ me, setMe, onSignedOut }) {
-  const [tab, setTab] = useState('dashboard');
+  const [tab, setTab] = useHashTab();
   const [period, setPeriod] = useState('1w');
   const [report, setReport] = useState(null);
   const [error, setError] = useState('');
   const [unread, setUnread] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [portfolios, setPortfolios] = useState([]);
+  const [scope, setScopeState] = useState(() => readPref('portfolio', 'all'));
+  const lastLoad = useRef(0);
+
+  // The API reads the chosen portfolio from here, before any component below asks for data.
+  setScope(scope);
 
   const handle = useCallback(
     (e) => {
@@ -39,7 +82,29 @@ function Portfolio({ me, setMe, onSignedOut }) {
     [onSignedOut],
   );
 
+  const loadPortfolios = useCallback(async () => {
+    try {
+      const list = await api.portfolios();
+      setPortfolios(list);
+      // A remembered portfolio that no longer exists falls back to all of them.
+      if (scope !== 'all' && !list.some((p) => String(p.id) === scope)) {
+        writePref('portfolio', null);
+        setScopeState('all');
+      }
+    } catch (e) {
+      handle(e);
+    }
+  }, [scope, handle]);
+  useEffect(() => { loadPortfolios(); }, [loadPortfolios]);
+
+  const chooseScope = (s) => {
+    writePref('portfolio', s === 'all' ? null : s);
+    setScopeState(s);
+    setReport(null);
+  };
+
   const load = useCallback(async () => {
+    lastLoad.current = Date.now(); // as it starts, so a page turning visible meanwhile doesn't load again
     try {
       const [r, n] = await Promise.all([api.report(period), api.notifications()]);
       setReport(r);
@@ -48,12 +113,20 @@ function Portfolio({ me, setMe, onSignedOut }) {
     } catch (e) {
       handle(e);
     }
-  }, [period, handle]);
+  }, [period, handle, scope]); // scope: it changes what the API returns
 
+  // Reload every few minutes while the page is visible; a page coming back after a while reloads at once.
   useEffect(() => {
     load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) load(); }, AUTO_REFRESH_MS);
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastLoad.current > AUTO_REFRESH_MS) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
 
   const refresh = async () => {
@@ -69,6 +142,8 @@ function Portfolio({ me, setMe, onSignedOut }) {
     }
   };
 
+  const changed = () => { load(); loadPortfolios(); };
+
   return (
     <div className="app">
       <a className="skip" href="#main">Skip to content</a>
@@ -76,13 +151,14 @@ function Portfolio({ me, setMe, onSignedOut }) {
         <Brand />
         <nav aria-label="Main">
           {TABS.map(([id, label]) => (
-            <button key={id} className={tab === id ? 'tab active' : 'tab'} aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>
+            <a key={id} href={`#/${id}`} className={tab === id ? 'tab active' : 'tab'} aria-current={tab === id ? 'page' : undefined}>
               {label}
               {id === 'alerts' && unread > 0 && <span className="badge">{unread}<span className="sr-only"> unread</span></span>}
-            </button>
+            </a>
           ))}
         </nav>
         <div className="asof">
+          <PortfolioPicker portfolios={portfolios} scope={scope} onChange={chooseScope} />
           {report?.market?.closedToday && report.market.lastSession && (
             <span className="market-closed" title="Prices are from the last trading session">
               Market closed{report.market.holiday ? ' today' : ''} · last session {sessionDay(report.market.lastSession)}
@@ -97,12 +173,13 @@ function Portfolio({ me, setMe, onSignedOut }) {
 
       {error && <div className="error" role="alert">{error}</div>}
 
-      <main id="main" tabIndex={-1}>
+      {/* Keyed by portfolio, so switching it reloads every view. */}
+      <main id="main" tabIndex={-1} key={scope}>
         {tab === 'dashboard' && (
           <Dashboard report={report} period={period} setPeriod={setPeriod} goToStocks={() => setTab('holdings')} />
         )}
         {tab === 'markets' && <Markets />}
-        {tab === 'holdings' && <Holdings onChange={load} />}
+        {tab === 'holdings' && <Holdings onChange={changed} portfolios={portfolios} scope={scope} />}
         {tab === 'watchlist' && <Watchlist onChange={load} />}
         {tab === 'gains' && <CapitalGains />}
         {tab === 'alerts' && <Alerts onRead={load} />}
@@ -111,6 +188,8 @@ function Portfolio({ me, setMe, onSignedOut }) {
             me={me}
             onUserChange={(user) => setMe({ ...me, user })}
             onSignedOut={onSignedOut}
+            portfolios={portfolios}
+            onPortfoliosChange={changed}
           />
         )}
       </main>

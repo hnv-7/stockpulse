@@ -18,9 +18,9 @@ import {
 import { api } from '../api.js';
 import { money, compactMoney, price, pct, signedMoney, tone, shortDate, timeAgo, PERIOD_LABEL, PERIOD_VS } from '../format.js';
 
-const GREEN = '#15803d';
-const RED = '#b91c1c';
-const BLUE = '#2563eb';
+const GREEN = 'var(--chart-green)';
+const RED = 'var(--chart-red)';
+const BLUE = 'var(--chart-blue)';
 
 function Stat({ label, value, sub, cls = '' }) {
   return (
@@ -55,12 +55,12 @@ function PortfolioChart() {
         <div role="img" aria-label={`Portfolio value from ${money(data[0].value)} on ${shortDate(data[0].date)} to ${money(data[data.length - 1].value)} on ${shortDate(data[data.length - 1].date)}. You invested ${money(data[data.length - 1].invested)}.`}>
         <ResponsiveContainer width="100%" height={260}>
           <ComposedChart data={data} margin={{ left: 8, right: 8, top: 8 }}>
-            <CartesianGrid stroke="#eef0f3" vertical={false} />
+            <CartesianGrid stroke="var(--grid)" vertical={false} />
             <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={40} fontSize={12} />
             <YAxis domain={['auto', 'auto']} tickFormatter={compactMoney} width={64} fontSize={12} />
             <Tooltip formatter={(v, n) => [money(v), n === 'value' ? 'Value' : 'Invested']} labelFormatter={shortDate} />
-            <Area type="monotone" dataKey="value" stroke={BLUE} fill="#dbeafe" strokeWidth={2} />
-            <Line type="stepAfter" dataKey="invested" stroke="#6b7280" strokeDasharray="4 4" dot={false} />
+            <Area type="monotone" dataKey="value" stroke={BLUE} fill="var(--chart-area)" strokeWidth={2} />
+            <Line type="stepAfter" dataKey="invested" stroke="var(--ref)" strokeDasharray="4 4" dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
         </div>
@@ -72,7 +72,7 @@ function PortfolioChart() {
   );
 }
 
-const ORANGE = '#d97706';
+const ORANGE = 'var(--chart-orange)';
 const RANGE_LABEL = { '1m': '1 month', '3m': '3 months', '6m': '6 months', '1y': '1 year' };
 
 /** "1.25 points ahead of Nifty 50" for a difference in percentage points. */
@@ -186,10 +186,10 @@ function BenchmarkCard({ period }) {
           <div role="img" aria-label={`Over ${RANGE_LABEL[range]}, your stocks ${pct(last.yoursPct)} and ${name} ${pct(last.indexPct)}.`}>
             <ResponsiveContainer width="100%" height={240}>
               <LineChart data={points} margin={{ left: 8, right: 8, top: 8 }}>
-                <CartesianGrid stroke="#eef0f3" vertical={false} />
+                <CartesianGrid stroke="var(--grid)" vertical={false} />
                 <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={40} fontSize={12} />
                 <YAxis domain={['auto', 'auto']} width={56} fontSize={12} tickFormatter={(v) => `${v > 0 ? '+' : ''}${Math.round(v)}%`} />
-                <ReferenceLine y={0} stroke="#9ca3af" />
+                <ReferenceLine y={0} stroke="var(--zero)" />
                 <Tooltip formatter={(v, n) => [pct(v), n === 'yoursPct' ? 'Your stocks' : name]} labelFormatter={shortDate} />
                 <Line type="monotone" dataKey="yoursPct" stroke={BLUE} strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="indexPct" stroke={ORANGE} strokeWidth={2} dot={false} />
@@ -209,32 +209,206 @@ function BenchmarkCard({ period }) {
 const ticker = (symbol) => symbol.replace(/\.(NS|BO)$/, '');
 const exDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 
-/** How the portfolio splits by sector, and how much sits in its largest stocks. */
+const UNKNOWN_SECTOR = 'Sector not known';
+/** Yahoo's sectors, plus the groups funds and ETFs go in, so a target can be set before you hold anything there. */
+const SECTOR_CHOICES = [
+  'Financial Services', 'Technology', 'Consumer Cyclical', 'Consumer Defensive', 'Healthcare', 'Industrials', 'Energy',
+  'Basic Materials', 'Communication Services', 'Utilities', 'Real Estate', 'Mutual funds', 'ETFs',
+];
+
+/**
+ * New money split between the sectors furthest below target, so they move towards it without selling anything.
+ * Returns [{sector, amount}].
+ */
+function splitNewMoney(rows, amount) {
+  const total = rows.reduce((s, r) => s + r.value, 0) + amount;
+  const short = rows.map((r) => ({ sector: r.sector, gap: Math.max((r.targetPct / 100) * total - r.value, 0), targetPct: r.targetPct }));
+  const gaps = short.reduce((s, r) => s + r.gap, 0);
+  if (gaps <= 0) {
+    const pcts = short.reduce((s, r) => s + r.targetPct, 0) || 1;
+    return short.map((r) => ({ sector: r.sector, amount: (amount * r.targetPct) / pcts })).filter((r) => r.amount > 0.5);
+  }
+  return short.map((r) => ({ sector: r.sector, amount: (amount * r.gap) / gaps })).filter((r) => r.amount > 0.5);
+}
+
+function TargetEditor({ sectors, targets, onSaved, onCancel }) {
+  const names = [...new Set([...sectors.map((s) => s.sector ?? UNKNOWN_SECTOR), ...targets.map((t) => t.sector), ...SECTOR_CHOICES])];
+  const [values, setValues] = useState(() => Object.fromEntries(targets.map((t) => [t.sector, String(t.pct)])));
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const total = names.reduce((s, n) => s + (Number(values[n]) || 0), 0);
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const list = names.filter((n) => Number(values[n]) > 0).map((n) => ({ sector: n, pct: Number(values[n]) }));
+      await api.setTargets(list);
+      onSaved();
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+  // Fill in today's weights as a starting point.
+  const useCurrent = () =>
+    setValues(Object.fromEntries(sectors.map((s) => [s.sector ?? UNKNOWN_SECTOR, String(Math.round(s.weightPct))])));
+  return (
+    <div className="review">
+      <h3>Target share of your portfolio per sector</h3>
+      <div className="target-grid">
+        {names.map((n) => (
+          <label key={n}>
+            <span>{n}</span>
+            <span className="with-unit">
+              <input type="number" min="0" max="100" step="any" value={values[n] ?? ''} onChange={(e) => setValues({ ...values, [n]: e.target.value })} aria-label={`Target for ${n}`} />
+              %
+            </span>
+          </label>
+        ))}
+      </div>
+      <p className={`small ${Math.abs(total - 100) < 0.01 ? 'pos' : total > 100 ? 'neg' : 'muted'}`}>
+        Total {Number(total.toFixed(2))}%{Math.abs(total - 100) < 0.01 ? '' : total > 100 ? ': more than 100%' : `: ${Number((100 - total).toFixed(2))}% still to assign`}
+      </p>
+      {error && <div className="error" role="alert">{error}</div>}
+      <div className="actions">
+        <button className="primary" onClick={save} disabled={busy || total > 100.0001}>Save targets</button>
+        <button onClick={useCurrent} disabled={busy}>Start from today's weights</button>
+        <button onClick={onCancel} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function Rebalance({ plan }) {
+  const [amount, setAmount] = useState('');
+  if (!plan.complete) {
+    return <p className="muted small">Your targets add up to {Number(plan.targetTotal.toFixed(2))}%. Set them to 100% to see how to rebalance.</p>;
+  }
+  const extra = Number(amount) > 0 ? splitNewMoney(plan.rows, Number(amount)) : null;
+  const near = (r) => Math.abs(r.driftPct) < 2;
+  return (
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Sector</th><th className="r">Now</th><th className="r">Target</th><th className="r">To get there</th></tr></thead>
+          <tbody>
+            {plan.rows.map((r) => (
+              <tr key={r.sector}>
+                <td>{r.sector}</td>
+                <td className="r">{r.weightPct.toFixed(1)}%<div className="muted small">{money(r.value)}</div></td>
+                <td className="r">{r.targetPct ? `${r.targetPct}%` : '—'}</td>
+                <td className={`r ${near(r) ? 'muted' : r.amount > 0 ? 'pos' : 'neg'}`}>
+                  {near(r) ? 'On target' : `${r.amount > 0 ? 'Buy' : 'Sell'} ${money(Math.abs(r.amount))}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="row new-money">
+        <label className="field">
+          <span className="muted small">Investing new money? Amount (₹)</span>
+          <input type="number" min="0" step="any" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 50000" />
+        </label>
+        {extra && (
+          <p className="small">
+            Put it into the sectors furthest below target, without selling: {extra.map((e) => `${e.sector} ${money(e.amount)}`).join(', ')}.
+          </p>
+        )}
+      </div>
+      <p className="muted small">Within 2 points of target counts as on target. Selling can mean capital gains tax; check the Capital gains tab first.</p>
+    </>
+  );
+}
+
+/** How the portfolio splits by sector, how much sits in its largest stocks, and how far it is from your targets. */
 function AllocationCard() {
   const [data, setData] = useState(null);
-  useEffect(() => {
-    api.allocation().then(setData).catch(() => setData(null));
-  }, []);
+  const [editing, setEditing] = useState(false);
+  const load = () => api.allocation().then(setData).catch(() => setData(null));
+  useEffect(() => { load(); }, []);
   if (!data || !data.sectors.length) return null;
   const [largest] = data.top;
+  const target = new Map((data.targets ?? []).map((t) => [t.sector, t.pct]));
   return (
     <section className="card">
-      <h2>Where your money is</h2>
+      <div className="card-head">
+        <h2>Where your money is</h2>
+        {!editing && <button onClick={() => setEditing(true)}>{data.targets?.length ? 'Edit targets' : 'Set targets'}</button>}
+      </div>
       <ul className="alloc">
-        {data.sectors.map((s) => (
-          <li key={s.sector ?? 'unknown'}>
-            <div className="alloc-head">
-              <span className={s.sector ? '' : 'muted'}>{s.sector ?? 'Sector not known'}</span>
-              <strong>{s.weightPct.toFixed(1)}%</strong>
-            </div>
-            <div className="alloc-bar" aria-hidden="true"><span style={{ width: `${s.weightPct}%` }} /></div>
-            <div className="muted small">{money(s.value)} · {s.stocks.map(ticker).join(', ')}</div>
-          </li>
-        ))}
+        {data.sectors.map((s) => {
+          const t = target.get(s.sector ?? UNKNOWN_SECTOR);
+          return (
+            <li key={s.sector ?? 'unknown'}>
+              <div className="alloc-head">
+                <span className={s.sector ? '' : 'muted'}>{s.sector ?? UNKNOWN_SECTOR}</span>
+                <strong>{s.weightPct.toFixed(1)}%{t != null && <span className="muted small"> / target {t}%</span>}</strong>
+              </div>
+              <div className="alloc-bar" aria-hidden="true">
+                <span style={{ width: `${s.weightPct}%` }} />
+                {t != null && <i className="alloc-target" style={{ left: `${Math.min(t, 100)}%` }} />}
+              </div>
+              <div className="muted small">{money(s.value)} · {s.stocks.map(ticker).join(', ')}</div>
+            </li>
+          );
+        })}
       </ul>
       <p className="small">
         Your largest stock, {ticker(largest.symbol)}, is {largest.weightPct.toFixed(1)}% of your portfolio
         {data.top.length > 1 && <>; your top {data.top.length} ({data.top.map((t) => ticker(t.symbol)).join(', ')}) are {data.topPct.toFixed(1)}%</>}.
+      </p>
+      {editing && (
+        <TargetEditor
+          sectors={data.sectors}
+          targets={data.targets ?? []}
+          onSaved={() => { setEditing(false); load(); }}
+          onCancel={() => setEditing(false)}
+        />
+      )}
+      {!editing && data.rebalance && (
+        <>
+          <h3>Rebalancing</h3>
+          <Rebalance plan={data.rebalance} />
+        </>
+      )}
+    </section>
+  );
+}
+
+const eventDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+
+/** Results and ex-dividend dates in the next few weeks, for stocks you hold or watch. */
+function ComingUpCard() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    api.events().then(setData).catch(() => setData(null));
+  }, []);
+  if (!data) return null;
+  return (
+    <section className="card">
+      <h2>Coming up</h2>
+      {data.items.length === 0 ? (
+        <p className="muted small">
+          {data.pending > 0 ? 'Looking up results and dividend dates for your stocks…' : `No results or ex-dividend dates known for the next ${data.days ?? 60} days.`}
+        </p>
+      ) : (
+        <ul className="div-list">
+          {data.items.map((e) => (
+            <li key={`${e.symbol}-${e.type}`}>
+              <span>
+                <strong>{ticker(e.symbol)}</strong>{' '}
+                {e.type === 'results' ? 'quarterly results' : 'goes ex-dividend'}
+                {e.estimate && <span className="muted small"> (expected)</span>}
+                {!e.held && e.watching && <span className="mk-tag">watching</span>}
+              </span>
+              <span className="nowrap">{eventDay(e.date)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="muted small">
+        From Yahoo Finance; results dates marked expected may move. To get a dividend you must hold the shares before the ex-dividend date.
       </p>
     </section>
   );
@@ -318,11 +492,11 @@ function ContributionChart({ rows, period }) {
       <div role="img" aria-label={`Change in value by stock, ${PERIOD_LABEL[period].toLowerCase()}: ${[...data].reverse().map((d) => `${d.symbol} ${signedMoney(d.change)}`).join(', ')}.`}>
       <ResponsiveContainer width="100%" height={Math.max(160, data.length * 34)}>
         <BarChart data={data} layout="vertical" margin={{ left: 16, right: 24 }}>
-          <CartesianGrid stroke="#eef0f3" horizontal={false} />
+          <CartesianGrid stroke="var(--grid)" horizontal={false} />
           <XAxis type="number" tickFormatter={(v) => signedMoney(v)} fontSize={12} />
           <YAxis type="category" dataKey="symbol" width={90} fontSize={12} />
           <Tooltip formatter={(v) => [signedMoney(v), 'Change']} />
-          <ReferenceLine x={0} stroke="#9ca3af" />
+          <ReferenceLine x={0} stroke="var(--zero)" />
           <Bar dataKey="change" radius={2}>
             {data.map((d) => (
               <Cell key={d.symbol} fill={d.change < 0 ? RED : GREEN} />
@@ -366,7 +540,7 @@ function StockDetail({ row, period, onClose }) {
         <div role="img" aria-label={`${row.symbol} price from ${price(points[0].price)} to ${price(points[points.length - 1].price)}. Your average cost is ${price(row.avgCost)}.`}>
         <ResponsiveContainer width="100%" height={240}>
           <LineChart data={points} margin={{ left: 8, right: 8, top: 8 }}>
-            <CartesianGrid stroke="#eef0f3" vertical={false} />
+            <CartesianGrid stroke="var(--grid)" vertical={false} />
             <XAxis
               dataKey={intraday ? 'ts' : 'date'}
               tickFormatter={(v) => (intraday ? new Date(v).toLocaleString('en-IN', { day: 'numeric', hour: '2-digit', minute: '2-digit' }) : shortDate(v))}
@@ -375,7 +549,7 @@ function StockDetail({ row, period, onClose }) {
             />
             <YAxis domain={['auto', 'auto']} width={64} fontSize={12} tickFormatter={(v) => `₹${Math.round(v)}`} />
             <Tooltip formatter={(v) => [price(v), 'Price']} labelFormatter={(v) => (intraday ? new Date(v).toLocaleString('en-IN') : shortDate(v))} />
-            {hist?.avgCost && <ReferenceLine y={hist.avgCost} stroke="#6b7280" strokeDasharray="4 4" />}
+            {hist?.avgCost && <ReferenceLine y={hist.avgCost} stroke="var(--ref)" strokeDasharray="4 4" />}
             <Line type="monotone" dataKey="price" stroke={BLUE} strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
@@ -504,6 +678,7 @@ export default function Dashboard({ report, period, setPeriod, goToStocks }) {
       </div>
 
       <Insights report={report} period={period} onPick={setSelected} />
+      <ComingUpCard />
       {selectedRow && <StockDetail row={selectedRow} period={period} onClose={() => setSelected(null)} />}
       <ContributionChart rows={report.holdings} period={period} />
       <PortfolioChart />

@@ -58,16 +58,18 @@ export function toCsv(header, rows) {
 export const isPastOrToday = (s) => isRealDate(s) && s <= istDate();
 
 /**
- * Merge validated rows into a user's portfolio: existing symbols are updated, new ones are added
+ * Merge validated rows into one of a user's portfolios (their first when portfolioId is null): existing symbols are
+ * updated, new ones are added
  * (after checking the symbol exists). Nothing is ever deleted. Per-row failures don't stop the rest.
  */
-export async function importHoldings({ store, tracker, lookupQuote, maxHoldings, userId, rows }) {
-  const existing = new Map((await store.listHoldings(userId)).map((h) => [h.symbol, h]));
+export async function importHoldings({ store, tracker, lookupQuote, maxHoldings, userId, rows, portfolioId = null }) {
+  const existing = new Map((await store.listHoldings(userId, portfolioId)).map((h) => [h.symbol, h]));
   const errors = [];
   const toUpdate = [];
   const toAdd = [];
   const seen = new Set();
-  let count = existing.size;
+  // The cap counts every portfolio.
+  let count = await store.countHoldings(userId);
 
   for (const r of rows) {
     if (seen.has(r.symbol)) {
@@ -112,6 +114,7 @@ export async function importHoldings({ store, tracker, lookupQuote, maxHoldings,
         quantity: r.quantity,
         invested: r.invested,
         purchaseDate: r.purchaseDate ?? null,
+        portfolioId,
       });
       added.push({ symbol: r.symbol, price: quote.price });
     } catch {

@@ -4,11 +4,11 @@ import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
 import { price, pct, tone, shortDate, timeAgo } from '../format.js';
 import SymbolSearch from './SymbolSearch.jsx';
-import { SplitReview } from './Holdings.jsx';
+import SplitReview from './SplitReview.jsx';
 
-const BLUE = '#2563eb';
-const GREEN = '#15803d';
-const RED = '#b91c1c';
+const BLUE = 'var(--chart-blue)';
+const GREEN = 'var(--chart-green)';
+const RED = 'var(--chart-red)';
 const COLS = 9;
 
 const dayOf = (ts) => new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -198,7 +198,7 @@ function WatchChart({ row, onClose }) {
         <div role="img" aria-label={`${row.symbol} price from ${price(points[0].price)} to ${price(points[points.length - 1].price)}.`}>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={points} margin={{ left: 8, right: 8, top: 8 }}>
-              <CartesianGrid stroke="#eef0f3" vertical={false} />
+              <CartesianGrid stroke="var(--grid)" vertical={false} />
               <XAxis
                 dataKey={intraday ? 'ts' : 'date'}
                 tickFormatter={(v) => (intraday ? new Date(v).toLocaleString('en-IN', { day: 'numeric', hour: '2-digit', minute: '2-digit' }) : shortDate(v))}
@@ -207,7 +207,7 @@ function WatchChart({ row, onClose }) {
               />
               <YAxis domain={['auto', 'auto']} width={64} fontSize={12} tickFormatter={(v) => `₹${Math.round(v)}`} />
               <Tooltip formatter={(v) => [price(v), 'Price']} labelFormatter={(v) => (intraday ? new Date(v).toLocaleString('en-IN') : shortDate(v))} />
-              {row.addedPrice && <ReferenceLine y={row.addedPrice} stroke="#6b7280" strokeDasharray="4 4" ifOverflow="extendDomain" />}
+              {row.addedPrice && <ReferenceLine y={row.addedPrice} stroke="var(--ref)" strokeDasharray="4 4" ifOverflow="extendDomain" />}
               {live.map((t) => (
                 <ReferenceLine key={t.id} y={t.targetPrice} stroke={t.direction === 'above' ? GREEN : RED} strokeDasharray="2 3" ifOverflow="extendDomain" />
               ))}

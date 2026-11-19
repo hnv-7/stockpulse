@@ -1,5 +1,9 @@
 import YahooFinance from 'yahoo-finance2';
 import { istDate } from './dates.js';
+import { createFunds, isFund } from './mf.js';
+
+/** Mutual funds ("MF:<scheme code>") come from AMFI and mfapi.in; everything else from Yahoo. */
+export const funds = createFunds();
 
 const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
@@ -42,8 +46,9 @@ export function createTtlCache(ttlMs, { now = Date.now, maxEntries = 500 } = {})
 // On serverless hosting each instance has its own cache, so this trims repeat calls, not all of them.
 const quoteCache = createTtlCache(45_000);
 
-/** Latest quote for one symbol, or null when Yahoo has nothing usable. */
+/** Latest quote for one symbol, or null when Yahoo (or AMFI, for a fund) has nothing usable. */
 export function getQuote(symbol) {
+  if (isFund(symbol)) return quoteCache(symbol, () => funds.quote(symbol));
   return quoteCache(symbol, async () => {
     const q = await withRetry(() => yf.quote(symbol));
     if (!q || typeof q.regularMarketPrice !== 'number') return null;
@@ -108,6 +113,7 @@ export function parseSplits(events) {
  * Yahoo's closes are already adjusted for those splits, i.e. expressed in today's shares.
  */
 export async function getDailyHistoryWithSplits(symbol, days = 400) {
+  if (isFund(symbol)) return { points: await funds.history(symbol, days), splits: [] };
   const period1 = new Date(Date.now() - days * 86_400_000);
   const res = await withRetry(() => yf.chart(symbol, { period1, interval: '1d', events: 'split' }));
   const points = (res.quotes || [])
@@ -126,15 +132,37 @@ export function parseDividends(events) {
 
 /** Dividends per share paid since `fromDate` (YYYY-MM-DD), by ex-date. */
 export async function getDividends(symbol, fromDate) {
+  if (isFund(symbol)) return []; // IDCW payouts aren't tracked; growth plans pay none
   const res = await withRetry(() => yf.chart(symbol, { period1: new Date(`${fromDate}T00:00:00Z`), interval: '1d', events: 'div' }));
   return parseDividends(res.events?.dividends);
 }
 
-/** A company's sector and industry, or null when Yahoo has none (common for small companies). */
+/**
+ * A company's sector and industry, or null when Yahoo has none (common for small companies). ETFs, which Yahoo gives no
+ * sector, are grouped as "ETFs"; funds as "Mutual funds" with their AMFI category as the industry. `kind` is 'stock',
+ * 'etf' or 'mf'.
+ */
 export async function getProfile(symbol) {
-  const res = await withRetry(() => yf.quoteSummary(symbol, { modules: ['assetProfile'] }));
+  if (isFund(symbol)) return funds.profile(symbol);
+  const res = await withRetry(() => yf.quoteSummary(symbol, { modules: ['assetProfile', 'quoteType'] }));
   const p = res?.assetProfile;
-  return p?.sector ? { sector: p.sector, industry: p.industry ?? null } : null;
+  const name = res?.quoteType?.longName || res?.quoteType?.shortName || '';
+  const etf = res?.quoteType?.quoteType === 'ETF' || /\bETF\b|BEES\b/i.test(name);
+  if (etf) return { sector: 'ETFs', industry: null, kind: 'etf' };
+  return p?.sector ? { sector: p.sector, industry: p.industry ?? null, kind: 'stock' } : null;
+}
+
+/**
+ * The next results date and the latest ex-dividend date Yahoo knows, as
+ * {earningsDate, earningsEstimate, exDividendDate} with IST dates (null when unknown).
+ */
+export async function getEvents(symbol) {
+  if (isFund(symbol)) return { earningsDate: null, earningsEstimate: false, exDividendDate: null };
+  const res = await withRetry(() => yf.quoteSummary(symbol, { modules: ['calendarEvents'] }));
+  const c = res?.calendarEvents;
+  const day = (d) => (d instanceof Date && !Number.isNaN(d.getTime()) ? istDate(d.getTime()) : null);
+  const earnings = (c?.earnings?.earningsDate ?? []).map(day).filter(Boolean).sort();
+  return { earningsDate: earnings[0] ?? null, earningsEstimate: !!c?.earnings?.isEarningsDateEstimate, exDividendDate: day(c?.exDividendDate) };
 }
 
 /** Daily closes, oldest first, as [{date, close}] (dates in IST). */
@@ -147,6 +175,7 @@ export async function getDailyHistory(symbol, days = 400) {
  * closed that day (weekend/holiday). Returns {date, close} or null when Yahoo has nothing.
  */
 export async function getCloseOn(symbol, date) {
+  if (isFund(symbol)) return funds.closeOn(symbol, date);
   const start = new Date(`${date}T00:00:00Z`);
   const res = await withRetry(() =>
     yf.chart(symbol, {
@@ -162,14 +191,22 @@ export async function getCloseOn(symbol, date) {
   return days.length ? days[days.length - 1] : null;
 }
 
-/** Search NSE/BSE equities by company name or ticker. */
+/**
+ * Search NSE/BSE shares and ETFs by company name or ticker, and mutual funds by name. Shares come first; either source
+ * failing just leaves its results out.
+ */
 export async function searchSymbols(query) {
-  const res = await withRetry(() => yf.search(query, { quotesCount: 12, newsCount: 0 }));
-  return (res.quotes || [])
-    .filter((q) => q.quoteType === 'EQUITY' && ['NSI', 'BSE'].includes(q.exchange))
+  const [stocks, mfs] = await Promise.allSettled([
+    withRetry(() => yf.search(query, { quotesCount: 12, newsCount: 0 })),
+    query.trim().length >= 3 ? funds.search(query, 6) : Promise.resolve([]),
+  ]);
+  const listed = (stocks.status === 'fulfilled' ? stocks.value.quotes || [] : [])
+    .filter((q) => ['EQUITY', 'ETF'].includes(q.quoteType) && ['NSI', 'BSE'].includes(q.exchange))
     .map((q) => ({
       symbol: q.symbol,
       name: q.longname || q.shortname || q.symbol,
       exchange: q.exchange === 'NSI' ? 'NSE' : 'BSE',
     }));
+  if (stocks.status === 'rejected' && mfs.status === 'rejected') throw stocks.reason;
+  return [...listed, ...(mfs.status === 'fulfilled' ? mfs.value : [])];
 }
