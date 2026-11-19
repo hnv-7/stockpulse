@@ -210,4 +210,61 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_rule ON notifications (rule_id, symbol, ts);
+
+-- Portfolios: a user can keep several (their own, a family member's, one per broker). Every holding and sale belongs
+-- to one. Users from before portfolios get one called "Main" holding everything they had.
+CREATE TABLE IF NOT EXISTS portfolios (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  UNIQUE (user_id, name)
+);
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS portfolio_id BIGINT REFERENCES portfolios(id) ON DELETE CASCADE;
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS portfolio_id BIGINT REFERENCES portfolios(id) ON DELETE CASCADE;
+INSERT INTO portfolios (user_id, name, created_at)
+  SELECT u.id, 'Main', u.created_at FROM users u
+   WHERE NOT EXISTS (SELECT 1 FROM portfolios p WHERE p.user_id = u.id)
+     AND (EXISTS (SELECT 1 FROM holdings h WHERE h.user_id = u.id AND h.portfolio_id IS NULL)
+       OR EXISTS (SELECT 1 FROM sales s WHERE s.user_id = u.id AND s.portfolio_id IS NULL));
+UPDATE holdings h SET portfolio_id = (SELECT MIN(p.id) FROM portfolios p WHERE p.user_id = h.user_id) WHERE h.portfolio_id IS NULL;
+UPDATE sales s SET portfolio_id = (SELECT MIN(p.id) FROM portfolios p WHERE p.user_id = s.user_id) WHERE s.portfolio_id IS NULL;
+ALTER TABLE holdings ALTER COLUMN portfolio_id SET NOT NULL;
+-- A stock appears once per portfolio (it used to be once per user).
+ALTER TABLE holdings DROP CONSTRAINT IF EXISTS holdings_user_id_symbol_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_holdings_portfolio_symbol ON holdings (portfolio_id, symbol);
+CREATE INDEX IF NOT EXISTS idx_holdings_user ON holdings (user_id);
+CREATE INDEX IF NOT EXISTS idx_sales_portfolio ON sales (portfolio_id);
+
+-- Target share of the portfolio per sector. scope is a portfolio id, or 0 for all of the user's portfolios together.
+CREATE TABLE IF NOT EXISTS allocation_targets (
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scope      BIGINT NOT NULL DEFAULT 0,
+  sector     TEXT NOT NULL,
+  target_pct DOUBLE PRECISION NOT NULL CHECK (target_pct > 0 AND target_pct <= 100),
+  PRIMARY KEY (user_id, scope, sector)
+);
+
+-- The weekly summary (opt-in), and the IST date it was last sent so a repeated cron call doesn't send it twice.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_digest BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS digest_sent_on DATE;
+
+-- What kind of instrument a symbol is: 'stock', 'etf' or 'mf' (mutual fund). NULL until looked up.
+ALTER TABLE stock_info ADD COLUMN IF NOT EXISTS kind TEXT;
+
+-- Upcoming results and ex-dividend dates (shared), as Yahoo publishes them; refreshed every few days.
+CREATE TABLE IF NOT EXISTS stock_events (
+  symbol            TEXT PRIMARY KEY,
+  earnings_date     DATE,
+  earnings_estimate BOOLEAN NOT NULL DEFAULT FALSE,
+  ex_dividend_date  DATE,
+  fetched_at        BIGINT NOT NULL
+);
+
+-- Rate-limit counters shared by every server instance (serverless instances don't share memory). Keys are hashed.
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key      TEXT PRIMARY KEY,
+  hits     INTEGER NOT NULL,
+  reset_at BIGINT NOT NULL
+);
 `;

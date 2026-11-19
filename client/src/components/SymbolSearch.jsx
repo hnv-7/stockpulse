@@ -72,7 +72,7 @@ export default function SymbolSearch({ id, query, setQuery, picked, setPicked, o
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="e.g. Infosys or INFY.NS"
+          placeholder="e.g. Infosys, INFY.NS or Parag Parikh Flexi Cap"
           required
           maxLength={40}
           autoComplete="off"
@@ -95,7 +95,11 @@ export default function SymbolSearch({ id, query, setQuery, picked, setPicked, o
               onMouseEnter={() => setActive(i)}
               onMouseDown={(e) => { e.preventDefault(); pick(r); }}
             >
-              <strong>{r.symbol}</strong> <span className="muted">{r.name} · {r.exchange}</span>
+              {r.exchange === 'MF' ? (
+                <><strong>{r.name}</strong> <span className="muted">· mutual fund</span></>
+              ) : (
+                <><strong>{r.symbol}</strong> <span className="muted">{r.name} · {r.exchange}</span></>
+              )}
             </li>
           ))}
         </ul>

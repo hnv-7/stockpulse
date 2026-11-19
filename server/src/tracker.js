@@ -1,4 +1,5 @@
 import { getQuotes, getDailyHistory, getDailyHistoryWithSplits } from './market.js';
+import { getNseCloses } from './nse.js';
 import { istDate, addDays, istDayStart } from './dates.js';
 import { evaluateRules, COOLDOWN_MS } from './alerts.js';
 import { splitMessage, RATIO_TOLERANCE } from './splits.js';
@@ -14,10 +15,11 @@ export const SPLIT_LOOKBACK_DAYS = 30;
 /** A move this large since the last close is checked for a split at once, even if the stock was checked today. */
 export const SPLIT_SUSPECT_MOVE = 0.08;
 
-export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory: gh, getSplits: gs } = {}) {
+export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory: gh, getSplits: gs, getNseCloses: gn } = {}) {
   const fetchQuotes = gq ?? getQuotes;
   const fetchHistory = gh ?? getDailyHistory;
   const fetchSplits = gs ?? getDailyHistoryWithSplits;
+  const fetchNseCloses = gn ?? getNseCloses;
 
   /** Daily closes for one symbol, ~13 months by default (used when a stock is first added, and nightly). */
   async function backfill(symbol, days = 400) {
@@ -191,7 +193,11 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
    */
   async function pollOnce({ now = Date.now(), userId = null } = {}) {
     try {
-      const holdings = (await store.listAllHoldings()).filter((h) => userId == null || h.userId === userId);
+      // A stock held in several of a user's portfolios is one stock to them: alerts look at it once.
+      const seen = new Set();
+      const holdings = (await store.listAllHoldings())
+        .filter((h) => userId == null || h.userId === userId)
+        .filter((h) => !seen.has(`${h.userId}|${h.symbol}`) && seen.add(`${h.userId}|${h.symbol}`));
       const watched = (await store.listAllWatchlist()).filter((w) => userId == null || w.userId === userId);
       // Alerts look at what each user holds, plus what they only watch (which "any stock" rules leave out).
       const heldBy = new Set(holdings.map((h) => `${h.userId}|${h.symbol}`));
@@ -242,6 +248,7 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
         await store.pruneSnapshots(now - 60 * 86_400_000);
         await store.pruneNotifications(now - 180 * 86_400_000);
         await store.deleteExpiredSessions(now);
+        await store.pruneRateLimits(now);
       }
       log('info', 'poll complete', { polled, alerts, scope: userId == null ? 'all' : 'user' });
       return { polled, alerts };
@@ -259,11 +266,40 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
     return pollOnce({ now, userId });
   }
 
-  /** Replace provisional closes with official ones. Bounded concurrency keeps it inside serverless time limits. */
-  async function refreshHistory() {
+  /**
+   * NSE (.NS) symbols whose close for `today` is still missing after the Yahoo refresh (Yahoo failed or lags) get it
+   * from NSE's own end-of-day file. Returns how many were filled in.
+   */
+  async function fillFromNse(symbols, today) {
+    const day = new Date(`${today}T00:00:00Z`).getUTCDay();
+    if (day === 0 || day === 6) return 0;
+    const nse = symbols.filter((s) => s.endsWith('.NS'));
+    if (!nse.length) return 0;
+    const last = await store.lastCloseDates(nse);
+    const missing = nse.filter((s) => (last.get(s) ?? '') < today);
+    if (!missing.length) return 0;
+    let file = null;
+    try {
+      file = await fetchNseCloses(today);
+    } catch (err) {
+      log('error', 'NSE closes fetch failed', { error: err?.message });
+      return 0;
+    }
+    if (!file) return 0; // a holiday, or the file isn't out yet
+    const rows = missing.filter((s) => file.closes.has(s)).map((s) => ({ symbol: s, date: today, close: file.closes.get(s) }));
+    await store.saveDailyCloses(rows);
+    if (rows.length) log('info', 'closes filled from NSE', { symbols: rows.length });
+    return rows.length;
+  }
+
+  /**
+   * Replace provisional closes with official ones: Yahoo's history first, then NSE's own file for any NSE symbol still
+   * without today's close. Bounded concurrency keeps it inside serverless time limits.
+   */
+  async function refreshHistory(now = Date.now()) {
     const symbols = await store.allSymbols();
     // Catches splits on days no price refresh ran. Runs first: it reads stored closes before they're replaced.
-    await checkSplits(symbols, Date.now());
+    await checkSplits(symbols, now);
     let ok = 0;
     // The index's recent closes too (older ones never change and are kept).
     if (symbols.length) await backfill(BENCHMARK.symbol).catch((err) => log('error', 'index history refresh failed', { error: err?.message }));
@@ -275,8 +311,9 @@ export function createTracker(store, { notifier, getQuotes: gq, getDailyHistory:
         else log('error', 'history refresh failed', { symbol: batch[j], error: r.reason?.message });
       });
     }
-    return { symbols: symbols.length, refreshed: ok };
+    const fromNse = await fillFromNse(symbols, istDate(now));
+    return { symbols: symbols.length, refreshed: ok, fromNse };
   }
 
-  return { backfill, checkSplits, ensureIndexHistory, pollOnce, refreshForUser, refreshHistory };
+  return { backfill, checkSplits, deliver, ensureIndexHistory, pollOnce, refreshForUser, refreshHistory };
 }

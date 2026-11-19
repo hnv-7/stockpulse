@@ -13,10 +13,14 @@ const heldFor = (days) => {
   return `${y}y${m ? ` ${m}m` : ''}`;
 };
 const rate = (r) => `${Number(r.toFixed(2))}%`;
-const TERM = { short: 'Short-term', long: 'Long-term', unknown: 'No purchase date' };
+const TERM = { short: 'Short-term', long: 'Long-term', unknown: 'No purchase date', other: 'Not estimated' };
 
 function Term({ term }) {
-  return <span className={`term ${term}`}>{TERM[term]}</span>;
+  return (
+    <span className={`term ${term === 'other' ? 'unknown' : term}`} title={term === 'other' ? 'Debt, gold or international fund or ETF: taxed differently' : undefined}>
+      {TERM[term]}
+    </span>
+  );
 }
 
 /** Download the year's rows as CSV, e.g. for a tax return or an accountant. */
@@ -82,6 +86,9 @@ function Notes({ data }) {
   if (data.unknown.count > 0) {
     notes.push(`${data.unknown.count} ${data.unknown.count === 1 ? 'sale is' : 'sales are'} of shares with no purchase date (${signedMoney(data.unknown.net)}), so ${data.unknown.count === 1 ? "it isn't" : "they aren't"} in the estimate. Add purchase dates to your holdings to include them.`);
   }
+  if (data.other?.count > 0) {
+    notes.push(`${data.other.count} ${data.other.count === 1 ? 'sale is' : 'sales are'} of debt, gold or international funds or ETFs (${signedMoney(data.other.net)}). These are taxed at your slab rate or with a 24-month long-term period, so they're listed but not in the estimate.`);
+  }
   if (data.rates.changedMidYear) {
     notes.push('Tax rates changed during this year, so each sale uses the rate in force on its date.');
   }
@@ -129,6 +136,9 @@ function StillHeld({ open }) {
       <div className="gains-unrealised">
         <div><span className="muted small">Short-term</span><strong className={tone(unrealised.shortTerm.net)}>{signedMoney(unrealised.shortTerm.net)}</strong></div>
         <div><span className="muted small">Long-term</span><strong className={tone(unrealised.longTerm.net)}>{signedMoney(unrealised.longTerm.net)}</strong></div>
+        {unrealised.other?.count > 0 && (
+          <div><span className="muted small">Debt, gold and international funds and ETFs</span><strong className={tone(unrealised.other.net)}>{signedMoney(unrealised.other.net)}</strong></div>
+        )}
         {unrealised.unknown.count > 0 && (
           <div><span className="muted small">No purchase date</span><strong className={tone(unrealised.unknown.net)}>{signedMoney(unrealised.unknown.net)}</strong></div>
         )}
@@ -155,6 +165,108 @@ function StillHeld({ open }) {
             </tbody>
           </table>
         </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ways to lower this year's tax before 31 March: book losses against gains already booked, and use what is left of the
+ * long-term exemption by selling and buying back.
+ */
+function SaveTax({ h }) {
+  const { losses, allLosses, exemption } = h;
+  const hasLosses = losses.length > 0;
+  const hasGains = exemption.picks.length > 0;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Ways to save tax before 31 March</h2>
+        <span className="muted small">{h.daysLeft} {h.daysLeft === 1 ? 'day' : 'days'} left in {h.label}</span>
+      </div>
+      {!hasLosses && !hasGains && (
+        <p className="muted">
+          Nothing to do right now: none of your holdings would book a loss, and {exemption.left > 0 ? 'none has a long-term gain to book tax-free' : "this year's long-term exemption is used up"}.
+        </p>
+      )}
+
+      {hasLosses && (
+        <>
+          <h3>Book losses</h3>
+          <p className="small">
+            {allLosses.taxSaved > 0 ? (
+              <>
+                Selling these books a loss that comes off the gains you've booked this year (all of them together:{' '}
+                <strong className="pos">{money(allLosses.taxSaved)}</strong> less tax).
+                {allLosses.carriedForward > 0 && <> {money(allLosses.carriedForward)} of loss would be left to carry forward for up to 8 years.</>}
+              </>
+            ) : (
+              <>
+                You haven't booked gains this year, so selling these wouldn't lower this year's tax. The {money(-allLosses.loss)} loss would carry
+                forward for up to 8 years, to set against gains you book later.
+              </>
+            )}
+            {' '}You can buy the shares back straight away if you still want to own them.
+          </p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Stock</th><th className="r">Sell</th><th className="r">Worth now</th><th className="r">Loss booked</th><th className="r">Tax saved this year</th></tr>
+              </thead>
+              <tbody>
+                {losses.map((l) => (
+                  <tr key={l.symbol}>
+                    <td><strong>{l.symbol}</strong><div className="muted small">{l.name}</div></td>
+                    <td className="r">all {shares(l.quantity)}</td>
+                    <td className="r">{money(l.value)}</td>
+                    <td className="r neg">
+                      {signedMoney(l.loss)}
+                      <div className="muted small">{[l.shortTerm < 0 && 'short-term', l.longTerm < 0 && 'long-term'].filter(Boolean).join(' + ')}</div>
+                    </td>
+                    <td className={`r ${l.taxSaved > 0 ? 'pos' : ''}`}>
+                      {l.taxSaved > 0 ? money(l.taxSaved) : '—'}
+                      {l.carriedForward > 0 && <div className="muted small">{money(l.carriedForward)} carried forward</div>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {hasGains && (
+        <>
+          <h3>Use the long-term exemption</h3>
+          <p className="small">
+            {money(exemption.left)} of long-term gains can still be booked tax-free this year. Selling these and buying them back books{' '}
+            <strong>{money(exemption.gain)}</strong> of gain at no tax and raises your cost, which saves about{' '}
+            <strong className="pos">{money(exemption.futureTaxSaved)}</strong> of tax when you finally sell. The shares bought back count as
+            short-term again for 12 months.
+          </p>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Stock</th><th className="r">Sell and buy back</th><th className="r">Worth</th><th className="r">Gain booked tax-free</th></tr></thead>
+              <tbody>
+                {exemption.picks.map((p) => (
+                  <tr key={p.symbol}>
+                    <td><strong>{p.symbol}</strong><div className="muted small">{p.name}</div></td>
+                    <td className="r">{shares(p.quantity)}</td>
+                    <td className="r">{money(p.value)}</td>
+                    <td className="r pos">{signedMoney(p.gain)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {(hasLosses || hasGains) && (
+        <p className="muted small">
+          At today's prices, selling your oldest purchases first. Each sale and purchase has costs (STT alone is about{' '}
+          {h.roundTripCostPct}% of the value for selling and buying back), and prices move between the two trades. Only shares and
+          equity funds with every purchase dated are included. An idea to check, not advice.
+        </p>
       )}
     </section>
   );
@@ -232,11 +344,12 @@ export default function CapitalGains() {
         <SalesTable data={data} />
       </section>
 
+      {data.current && data.harvest && <SaveTax h={data.harvest} />}
       {data.current && data.open && <StillHeld open={data.open} />}
       <DividendIncome data={data} dividends={dividends} />
 
       <p className="muted small gains-footnote">
-        An estimate to plan with, not tax advice. It uses the rates for listed shares where STT was paid, plus {data.rates.cess}% cess,
+        An estimate to plan with, not tax advice. It uses the rates for listed shares and equity funds where STT was paid, plus {data.rates.cess}% cess,
         and leaves out surcharge, rebates, any unused basic exemption, and the 31 Jan 2018 grandfathering of older shares.
         Charges are deducted as you entered them. After a bonus issue, the extra shares here carry the original purchase date
         with the cost spread over all shares; for tax they count from the allotment date at zero cost. Check against your

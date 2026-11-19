@@ -20,6 +20,7 @@ export async function buildApp({ db, config = getConfig(), deps = {}, oidcLib } 
     getQuotes: deps.getQuotes,
     getDailyHistory: deps.getDailyHistory,
     getSplits: deps.getSplits,
+    getNseCloses: deps.getNseCloses,
   });
   const auth = createAuth({ store, config, oidcLib });
   const app = createApp({ store, tracker, auth, config, notifier, deps });

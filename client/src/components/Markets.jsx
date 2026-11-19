@@ -4,11 +4,11 @@ import { api } from '../api.js';
 import { useSort, SortTh } from '../sort.jsx';
 import { price, pct, tone, shortDate, timeAgo } from '../format.js';
 
-const BLUE = '#2563eb';
-const ORANGE = '#d97706';
-const GREEN = '#15803d';
-const RED = '#b91c1c';
-const SLATE = '#64748b';
+const BLUE = 'var(--chart-blue)';
+const ORANGE = 'var(--chart-orange)';
+const GREEN = 'var(--chart-green)';
+const RED = 'var(--chart-red)';
+const SLATE = 'var(--chart-slate)';
 
 const PERIODS = { '1d': 'Today', '1w': '1 week', '1m': '1 month', '3m': '3 months' };
 /** A move this size (in %) gets the strongest tile colour; smaller moves are paler. */
@@ -130,10 +130,10 @@ function CompareChart({ sector, stock, period }) {
       <div role="img" aria-label={`Over ${span}, ${sectorName} ${pct(last.sector)}${stock ? ` and ${stock.name} ${pct(last.stock)}` : ''}.`}>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={data} margin={{ left: 8, right: 8, top: 8 }}>
-            <CartesianGrid stroke="#eef0f3" vertical={false} />
+            <CartesianGrid stroke="var(--grid)" vertical={false} />
             <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={40} fontSize={12} />
             <YAxis domain={['auto', 'auto']} width={56} fontSize={12} tickFormatter={(v) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(Math.abs(v) < 2 ? 1 : 0)}%`} />
-            <ReferenceLine y={0} stroke="#9ca3af" />
+            <ReferenceLine y={0} stroke="var(--zero)" />
             <Tooltip formatter={(v, n) => [pct(v), n === 'sector' ? sector.name : stock?.name]} labelFormatter={shortDate} />
             <Line type="monotone" dataKey="sector" stroke={BLUE} strokeWidth={2} dot={false} />
             {stock && <Line type="monotone" dataKey="stock" stroke={ORANGE} strokeWidth={2} dot={false} connectNulls />}
