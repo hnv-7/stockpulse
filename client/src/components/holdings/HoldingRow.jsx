@@ -3,6 +3,21 @@ import { api } from '../../api.js';
 import { money, price, signedMoney, pct, tone, timeAgo } from '../../format.js';
 import { todayIST, niceDate } from './shared.js';
 
+/** Shown instead of a purchase date when there is none: exports leave it blank and trackers like Google Finance ask for it. */
+function AddDate({ symbol, onClick, label = 'Add date' }) {
+  return (
+    <button
+      type="button"
+      className="link warn small"
+      onClick={onClick}
+      aria-label={`${label} for ${symbol}`}
+      title="No purchase date yet. Google Finance and most other trackers need one when you import the exported CSV."
+    >
+      {label}
+    </button>
+  );
+}
+
 /** One purchase of a stock, with its own date, quantity and amount. */
 function LotRow({ h, lot, onChanged }) {
   const [editing, setEditing] = useState(false);
@@ -47,7 +62,9 @@ function LotRow({ h, lot, onChanged }) {
         <>
           <td className="r">{lot.quantity}</td>
           <td className="r">{money(lot.invested)}</td>
-          <td className="r nowrap">{niceDate(lot.purchase_date)}</td>
+          <td className="r nowrap">
+            {lot.purchase_date ? niceDate(lot.purchase_date) : <AddDate symbol={h.symbol} onClick={() => setEditing(true)} />}
+          </td>
           <td colSpan={3} className="r">{error && <span className="neg small">{error}</span>}</td>
         </>
       )}
@@ -125,8 +142,11 @@ export default function HoldingRow({ h, onChanged, onSell, selling, portfolios =
           <td className="r">{h.quantity}</td>
           <td className="r">{money(h.invested)}</td>
           <td className="r nowrap">
-            {niceDate(h.purchase_date)}
-            {multi && <div className="muted small">earliest of {h.lots.length} purchases</div>}
+            {h.purchase_date ? niceDate(h.purchase_date) : (
+              // Bought on several occasions: each purchase has its own date, so open the list rather than one editor.
+              <AddDate symbol={h.symbol} label={multi ? 'Add dates' : 'Add date'} onClick={() => (multi ? setOpen(true) : setEditing(true))} />
+            )}
+            {multi && h.purchase_date && <div className="muted small">earliest of {h.lots.length} purchases</div>}
           </td>
           <td className="r">{h.value == null ? '—' : money(h.value)}</td>
           <td className={`r ${tone(h.pnl)}`}>{h.pnl == null ? '—' : <>{signedMoney(h.pnl)} <span className="small">({pct(h.pnlPct)})</span></>}</td>

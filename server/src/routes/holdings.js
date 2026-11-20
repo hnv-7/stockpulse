@@ -28,8 +28,9 @@ export function holdingRoutes(api, { store, tracker, config, limiter, lookups, d
   // ---------- holdings ----------
   api.get('/holdings', async (req, res) => res.json(await store.listHoldings(req.session.user.id, await data.scopeOf(req))));
 
-  // Download the portfolio as CSV. The same columns are accepted by the import below. Across several portfolios each
-  // row also says which one it is in.
+  // Download the portfolio as CSV. The same columns are accepted by the import below. Purchase Price (the average cost
+  // per share) is there for trackers such as Google Finance, which ask for a price per share rather than a total; our
+  // import reads it only when Invested is blank. Across several portfolios each row also says which one it is in.
   api.get('/holdings/export', async (req, res) => {
     const userId = req.session.user.id;
     const scope = await data.scopeOf(req);
@@ -37,9 +38,12 @@ export function holdingRoutes(api, { store, tracker, config, limiter, lookups, d
     const portfolios = await store.listPortfolios(userId);
     const named = scope == null && portfolios.length > 1;
     const nameOf = new Map(portfolios.map((p) => [p.id, p.name]));
+    const perShare = (h) => (h.quantity > 0 ? Math.round((h.invested / h.quantity) * 100) / 100 : null);
     const csv = toCsv(
-      ['Symbol', 'Name', 'Quantity', 'Invested', 'Purchase Date', ...(named ? ['Portfolio'] : [])],
-      holdings.map((h) => [h.symbol, h.name, h.quantity, h.invested, h.purchase_date, ...(named ? [nameOf.get(h.portfolioId)] : [])]),
+      ['Symbol', 'Name', 'Quantity', 'Invested', 'Purchase Price', 'Purchase Date', ...(named ? ['Portfolio'] : [])],
+      holdings.map((h) => [
+        h.symbol, h.name, h.quantity, h.invested, perShare(h), h.purchase_date, ...(named ? [nameOf.get(h.portfolioId)] : []),
+      ]),
     );
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="stockbeat-portfolio-${istDate()}.csv"`);

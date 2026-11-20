@@ -171,6 +171,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.primary:hover:not(:disabled) { background: var(--accent-strong); }
 button.danger { color: var(--neg); }
 button.link { border: 0; background: none; padding: 0; color: var(--accent); font-weight: 600; }
+button.link.warn { color: var(--warn-text); text-decoration: underline dotted; text-underline-offset: 3px; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

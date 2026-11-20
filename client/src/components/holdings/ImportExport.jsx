@@ -5,8 +5,11 @@ import { niceDate } from './shared.js';
 
 const MAX_UPLOAD = 2 * 1024 * 1024; // keep in step with the server limit
 
-/** Export button plus a file picker. Reading the file is the server's job; this only uploads it for a preview. */
-export function ImportExport({ onPreview, onMessage, portfolios = [], defaultPortfolio = null }) {
+/**
+ * Export button plus a file picker. Reading the file is the server's job; this only uploads it for a preview.
+ * onExport runs as the download starts (the caller warns about stocks the file has no purchase date for).
+ */
+export function ImportExport({ onPreview, onMessage, onExport, portfolios = [], defaultPortfolio = null }) {
   const fileRef = useRef();
   const [busy, setBusy] = useState(false);
   const [into, setInto] = useState(defaultPortfolio);
@@ -29,7 +32,7 @@ export function ImportExport({ onPreview, onMessage, portfolios = [], defaultPor
 
   return (
     <div className="actions">
-      <a className="button" href={api.exportUrl()} download>Export CSV</a>
+      <a className="button" href={api.exportUrl()} download onClick={onExport}>Export CSV</a>
       {portfolios.length > 1 && (
         <label className="picker">
           <span className="sr-only">Import into portfolio</span>
