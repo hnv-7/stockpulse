@@ -64,7 +64,9 @@ export function alertQueries(db, { one, many }) {
       return r.rowCount > 0;
     },
     async listNotifications(userId, limit = 50) {
-      return (await many('SELECT * FROM notifications WHERE user_id = $1 ORDER BY ts DESC LIMIT $2', [userId, limit])).map((r) => ({
+      return (
+        await many('SELECT * FROM notifications WHERE user_id = $1 AND cleared = FALSE ORDER BY ts DESC, id DESC LIMIT $2', [userId, limit])
+      ).map((r) => ({
         id: n(r.id),
         ts: n(r.ts),
         rule_id: n(r.rule_id),
@@ -78,10 +80,19 @@ export function alertQueries(db, { one, many }) {
       return n((await one('SELECT COUNT(*) AS c FROM notifications WHERE user_id = $1 AND rule_id IS NOT NULL AND ts >= $2', [userId, sinceTs])).c);
     },
     async unreadCount(userId) {
-      return n((await one('SELECT COUNT(*) AS c FROM notifications WHERE user_id = $1 AND read = FALSE', [userId])).c);
+      return n((await one('SELECT COUNT(*) AS c FROM notifications WHERE user_id = $1 AND read = FALSE AND cleared = FALSE', [userId])).c);
     },
     async markAllRead(userId) {
       await db.query('UPDATE notifications SET read = TRUE WHERE user_id = $1 AND read = FALSE', [userId]);
+    },
+    /** Hide the given notifications (or all of them when `ids` is null) from the user's list. Returns how many. */
+    async clearNotifications(userId, ids = null) {
+      const r = ids
+        ? await db.query('UPDATE notifications SET cleared = TRUE, read = TRUE WHERE user_id = $1 AND cleared = FALSE AND id = ANY($2::bigint[])', [
+            userId, ids,
+          ])
+        : await db.query('UPDATE notifications SET cleared = TRUE, read = TRUE WHERE user_id = $1 AND cleared = FALSE', [userId]);
+      return r.rowCount;
     },
     async pruneNotifications(beforeTs) {
       await db.query('DELETE FROM notifications WHERE ts < $1', [beforeTs]);

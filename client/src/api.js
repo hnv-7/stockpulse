@@ -93,5 +93,7 @@ export const api = {
   removeRule: (id) => request('DELETE', `/rules/${id}`),
   notifications: () => request('GET', '/notifications'),
   markRead: () => request('POST', '/notifications/read'),
+  clearNotifications: (ids) => request('POST', '/notifications/clear', { ids }),
+  clearAllNotifications: () => request('DELETE', '/notifications'),
   refresh: () => request('POST', '/refresh'),
 };

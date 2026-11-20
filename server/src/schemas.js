@@ -61,6 +61,7 @@ export const ruleUpdateSchema = z.object({
   targetPrice: z.number().finite().positive().max(1e9).optional(),
   enabled: z.boolean(),
 });
+export const notificationIdsSchema = z.object({ ids: z.array(z.number().int().positive()).min(1, 'choose at least one').max(200) });
 export const settingsSchema = z
   .object({ alertEmail: z.boolean().optional(), weeklyDigest: z.boolean().optional() })
   .refine((s) => s.alertEmail !== undefined || s.weeklyDigest !== undefined, 'nothing to change');
