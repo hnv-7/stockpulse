@@ -332,3 +332,46 @@ test('sign-in reports unavailable when Google credentials are missing', async ()
     await t.close();
   }
 });
+
+test('notifications: clear chosen ones or all, per user, without letting a cleared alert fire again', async () => {
+  const t = await setup();
+  try {
+    const alice = await t.login('alice@example.test');
+    const bob = await t.login('bob@example.test');
+    for (const u of [alice, bob]) {
+      await u.call('POST', '/api/holdings', { symbol: 'AAA.NS', quantity: 10, invested: 1000 });
+      await u.call('POST', '/api/rules', { symbol: null, window: '1d', thresholdPct: 5 });
+    }
+    assert.equal((await t.tracker.pollOnce()).alerts, 2);
+    const now = Date.now();
+    await t.store.addNotification({ userId: alice.user.id, ts: now - 1000, symbol: null, message: 'older one' });
+    await t.store.addNotification({ userId: alice.user.id, ts: now - 2000, symbol: null, message: 'oldest one' });
+
+    let list = (await alice.call('GET', '/api/notifications')).body;
+    assert.equal(list.items.length, 3);
+    assert.equal(list.unread, 3);
+    const [alert, older, oldest] = list.items;
+    assert.match(alert.message, /AAA\.NS is down/);
+
+    // Bob can't clear Alice's notifications by id.
+    assert.deepEqual((await bob.call('POST', '/api/notifications/clear', { ids: [older.id, oldest.id] })).body, { cleared: 0 });
+    assert.equal((await bob.call('POST', '/api/notifications/clear', { ids: [] })).status, 400);
+
+    // Clearing chosen ones hides them and drops them from the unread count.
+    assert.deepEqual((await alice.call('POST', '/api/notifications/clear', { ids: [older.id, oldest.id] })).body, { cleared: 2 });
+    list = (await alice.call('GET', '/api/notifications')).body;
+    assert.deepEqual(list.items.map((i) => i.id), [alert.id]);
+    assert.equal(list.unread, 1);
+
+    // Clearing all empties the list; Bob's stay.
+    assert.deepEqual((await alice.call('DELETE', '/api/notifications')).body, { cleared: 1 });
+    assert.deepEqual((await alice.call('GET', '/api/notifications')).body, { unread: 0, items: [] });
+    assert.equal((await bob.call('GET', '/api/notifications')).body.items.length, 1);
+
+    // The cleared alert still counts for the cooldown and the weekly summary.
+    assert.equal((await t.tracker.pollOnce()).alerts, 0, 'a cleared alert does not fire again inside its cooldown');
+    assert.equal(await t.store.countAlertsSince(alice.user.id, now - 86_400_000), 1);
+  } finally {
+    await t.close();
+  }
+});

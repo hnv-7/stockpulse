@@ -210,6 +210,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_rule ON notifications (rule_id, symbol, ts);
+-- Cleared by the user: hidden from the list, but kept (until pruned) so alert cooldowns and the weekly summary's
+-- count of alerts still see them. Deleting the row would let the same alert fire again on the next refresh.
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS cleared BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Portfolios: a user can keep several (their own, a family member's, one per broker). Every holding and sale belongs
 -- to one. Users from before portfolios get one called "Main" holding everything they had.

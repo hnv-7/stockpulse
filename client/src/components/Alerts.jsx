@@ -55,6 +55,84 @@ function RuleRow({ rule, onChanged }) {
   );
 }
 
+function Notifications({ items, onCleared }) {
+  const [picked, setPicked] = useState(() => new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  // Drop picks for notifications that are no longer listed.
+  useEffect(() => {
+    setPicked((p) => {
+      const ids = new Set(items.map((i) => i.id));
+      const kept = [...p].filter((id) => ids.has(id));
+      return kept.length === p.size ? p : new Set(kept);
+    });
+  }, [items]);
+
+  const toggle = (id) => setPicked((p) => {
+    const next = new Set(p);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allPicked = items.length > 0 && picked.size === items.length;
+  const togglePickAll = () => setPicked(allPicked ? new Set() : new Set(items.map((i) => i.id)));
+
+  const run = async (fn) => {
+    setBusy(true);
+    setError('');
+    try {
+      await fn();
+      setPicked(new Set());
+      await onCleared();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const deletePicked = () => run(() => api.clearNotifications([...picked]));
+  const clearAll = () => {
+    if (!window.confirm(`Clear all ${items.length === 1 ? 'notification' : 'notifications'}? This can't be undone.`)) return;
+    run(() => api.clearAllNotifications());
+  };
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Recent notifications</h2>
+        {items.length > 0 && (
+          <div className="actions">
+            {picked.size > 0 && (
+              <button className="danger" onClick={deletePicked} disabled={busy}>Delete selected ({picked.size})</button>
+            )}
+            <button onClick={clearAll} disabled={busy}>Clear all</button>
+          </div>
+        )}
+      </div>
+      {error && <div className="error" role="alert">{error}</div>}
+      {items.length === 0 ? <p className="muted">No notifications. Alerts that fire show up here.</p> : (
+        <>
+          <label className="pick-all muted small">
+            <input type="checkbox" checked={allPicked} ref={(el) => { if (el) el.indeterminate = picked.size > 0 && !allPicked; }} onChange={togglePickAll} disabled={busy} />
+            Select all
+          </label>
+          <ul className="notes">
+            {items.map((n) => (
+              <li key={n.id} className={`${n.read ? '' : 'unread'}${picked.has(n.id) ? ' picked' : ''}`}>
+                <label className="note-pick">
+                  <input type="checkbox" checked={picked.has(n.id)} onChange={() => toggle(n.id)} disabled={busy} aria-label={`Select: ${n.message}`} />
+                  <span className="note-msg">{n.message}</span>
+                </label>
+                <span className="muted small nowrap">{timeAgo(n.ts)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function Alerts({ onRead }) {
   const [rules, setRules] = useState([]);
   const [holdings, setHoldings] = useState([]);
@@ -159,19 +237,7 @@ export default function Alerts({ onRead }) {
         <p className="muted small">Alerts appear here. To also get them by email, turn that on in the Account tab.</p>
       </section>
 
-      <section className="card">
-        <h2>Recent notifications</h2>
-        {notes.items.length === 0 ? <p className="muted">Nothing has triggered yet.</p> : (
-          <ul className="notes">
-            {notes.items.map((n) => (
-              <li key={n.id} className={n.read ? '' : 'unread'}>
-                <span>{n.message}</span>
-                <span className="muted small">{timeAgo(n.ts)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <Notifications items={notes.items} onCleared={async () => { await load(); onRead(); }} />
     </>
   );
 }

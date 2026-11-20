@@ -1,5 +1,5 @@
 import { HttpError, parse, parseId } from '../http.js';
-import { ruleSchema, ruleUpdateSchema } from '../schemas.js';
+import { notificationIdsSchema, ruleSchema, ruleUpdateSchema } from '../schemas.js';
 
 /** Alert rules, notifications and the manual price refresh. Needs a session. */
 export function alertRoutes(api, { store, tracker, config, limiter }) {
@@ -47,6 +47,14 @@ export function alertRoutes(api, { store, tracker, config, limiter }) {
   api.post('/notifications/read', async (req, res) => {
     await store.markAllRead(req.session.user.id);
     res.status(204).end();
+  });
+  // Clear chosen notifications, or all of them. They disappear from the list but still count for alert cooldowns.
+  api.post('/notifications/clear', async (req, res) => {
+    const { ids } = parse(notificationIdsSchema, req.body);
+    res.json({ cleared: await store.clearNotifications(req.session.user.id, ids) });
+  });
+  api.delete('/notifications', async (req, res) => {
+    res.json({ cleared: await store.clearNotifications(req.session.user.id) });
   });
 
   api.post('/refresh', limiter('refresh', 60_000, 5), async (req, res) => {
