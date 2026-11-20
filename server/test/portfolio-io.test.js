@@ -222,8 +222,10 @@ test('export is a CSV that previews back to the same holdings', async () => {
     assert.match(exp.headers.get('content-type'), /text\/csv/);
     assert.match(exp.headers.get('content-disposition'), /attachment; filename="stockbeat-portfolio-\d{4}-\d{2}-\d{2}\.csv"/);
     const csv = await exp.text();
-    assert.equal(csv.split('\r\n')[0], 'Symbol,Name,Quantity,Invested,Purchase Date');
-    assert.match(csv, /AAA\.NS,AAA\.NS Ltd,10,1000,2024-01-15/);
+    assert.equal(csv.split('\r\n')[0], 'Symbol,Name,Quantity,Invested,Purchase Price,Purchase Date');
+    assert.match(csv, /AAA\.NS,AAA\.NS Ltd,10,1000,100,2024-01-15\r\n/);
+    // No date stored: the cell is left blank rather than made up.
+    assert.match(csv, /BBB\.NS,BBB\.NS Ltd,4,200,50,\r\n/);
 
     const p = await preview(t, u, csv);
     assert.equal(p.status, 200);

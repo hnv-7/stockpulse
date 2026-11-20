@@ -16,6 +16,7 @@ export default function Holdings({ onChange, portfolios = [], scope = 'all' }) {
   const [sellingId, setSellingId] = useState(null); // holding whose sell form is open
   const [sales, setSales] = useState(null);
   const [splits, setSplits] = useState([]); // splits / bonus issues waiting for the user to confirm
+  const [exported, setExported] = useState(false); // exported while some stocks had no purchase date
 
   const load = async () => {
     const [h, r, s, sp] = await Promise.all([api.holdings(), api.report('1w'), api.sales(), api.splits()]);
@@ -71,6 +72,8 @@ export default function Holdings({ onChange, portfolios = [], scope = 'all' }) {
     [holdings, rows, several, portfolios], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const { sorted, sort, toggle } = useSort(merged, { key: 'symbol', dir: 'asc' });
+  // Stocks the export would send without a purchase date (once each, though one may sit in several portfolios).
+  const undated = useMemo(() => [...new Set(holdings.filter((h) => !h.purchase_date).map((h) => h.symbol))].sort(), [holdings]);
 
   return (
     <>
@@ -82,6 +85,7 @@ export default function Holdings({ onChange, portfolios = [], scope = 'all' }) {
           <ImportExport
             onPreview={(p, into) => { setMessage(null); setPreview({ ...p, into }); }}
             onMessage={setMessage}
+            onExport={() => setExported(undated.length > 0)}
             portfolios={portfolios}
             defaultPortfolio={target}
           />
@@ -90,9 +94,20 @@ export default function Holdings({ onChange, portfolios = [], scope = 'all' }) {
           When you buy more of a stock you already hold, add it again with its purchase date: each purchase is kept separately and the totals
           are worked out for you (the average cost is invested ÷ quantity).
           To load your portfolio from a broker, use <strong>Import statement</strong> with the holdings file you download from Groww, Zerodha, Dhan, Upstox, Angel One and similar
-          (Excel, CSV, JSON or PDF). You can review everything before it is saved. Export CSV gives you a file you can edit and import back.
+          (Excel, CSV, JSON or PDF). You can review everything before it is saved. Export CSV gives you a file you can edit and import back,
+          or load into Google Finance and other trackers (they need a purchase date for every stock).
         </p>
         {message && <div className={message.ok ? 'notice' : 'error'} role="status">{message.text}</div>}
+        {exported && (
+          // Worked out from the live list, so it shrinks as dates are added.
+          <div className={undated.length ? 'warn box' : 'notice'} role="status">
+            {undated.length
+              ? `${undated.length === 1 ? 'One stock has' : `${undated.length} stocks have`} no purchase date, so the export leaves the date blank ` +
+                `and Google Finance (or another tracker) will ask for it: ${undated.join(', ')}. ` +
+                'Use Add date in the Bought column, then export again.'
+              : 'Every stock now has a purchase date. Export again to get them all in the file.'}
+          </div>
+        )}
         {preview && (
           <ImportReview preview={preview} into={preview.into} intoName={several ? portfolioName.get(preview.into) : null} onDone={imported} onCancel={() => setPreview(null)} />
         )}
